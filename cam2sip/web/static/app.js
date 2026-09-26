@@ -95,6 +95,17 @@ async function loadAll() {
 }
 const camById = id => state.cameras.find(c => c.id === id);
 const phoneById = id => state.phones.find(p => p.id === id);
+const optionName = o => o.label || camById(o.camera_id)?.name || '?';
+function bridgeCameras(b) {
+  if (b.mode !== 'ivr') return esc(camById(b.camera_id)?.name || 'missing');
+  return b.ivr_options.map(o => `<span class="badge plain">${esc(o.digit)}</span> ${esc(optionName(o))}`).join(' &nbsp;');
+}
+function bridgeState(b, st) {
+  if (!b.enabled) return badge('disabled');
+  if (st.calls.some(c => c.bridge_id === b.id)) return badge('in call', 'info');
+  if (b.mode !== 'ivr' && st.busy_cameras.includes(b.camera_id)) return badge('camera busy', 'warn');
+  return badge('ready', 'ok');
+}
 
 /* ---------- router ---------- */
 let pollTimer = null;
@@ -127,7 +138,8 @@ function callCard(c) {
     <dl class="kv">
       <dt>Camera</dt><dd>${esc(c.camera || '-')}</dd>
       <dt>Codec</dt><dd>${esc(c.codec || '-')}</dd>
-      <dt>Camera mic</dt><dd>${mic.connected ? badge(`live ${mic.codec || ''} · buffer ${mic.buffer_ms}ms`, 'ok') : badge(mic.error || 'connecting', mic.error ? 'bad' : 'warn')}</dd>
+      ${m.phase === 'menu' ? `<dt>IVR</dt><dd>${badge('caller is in the menu', 'info')}</dd>` : ''}
+      <dt>Camera mic</dt><dd>${m.phase === 'menu' ? badge('-', '', true) : mic.connected ? badge(`live ${mic.codec || ''} · buffer ${mic.buffer_ms}ms`, 'ok') : badge(mic.error || 'connecting', mic.error ? 'bad' : 'warn')}</dd>
       <dt>Camera speaker</dt><dd>${spk.state === 'connected' ? badge(spk.gate_open ? 'talking' : 'connected', spk.gate_open ? 'info' : 'ok') : badge(spk.state || 'n/a', spk.state === 'error' ? 'bad' : '')}</dd>
       <dt>${c.direction === 'web' ? 'Frames' : 'RTP'}</dt><dd class="mono">${c.rtp.rx_packets} in / ${c.rtp.tx_packets} out ${c.rtp.remote ? '· ' + esc(c.rtp.remote) : ''}</dd>
     </dl>
@@ -178,14 +190,13 @@ pages.dashboard = async () => {
         }).join('')}
       </table></div></div>` : ''}
       ${state.bridges.length ? `<div class="section"><h2>Bridges</h2><div class="table-wrap"><table>
-        <tr><th>Bridge</th><th>Camera</th><th>Phone</th><th>Registration</th><th>Status</th><th></th></tr>
+        <tr><th>Bridge</th><th>Camera(s)</th><th>Phone</th><th>Registration</th><th>Status</th><th></th></tr>
         ${state.bridges.map(b => {
-          const cam = camById(b.camera_id), ph = phoneById(b.phone_id);
-          const inCall = st.busy_cameras.includes(b.camera_id);
-          return `<tr><td>${esc(b.name || b.id)}</td><td>${esc(cam?.name || '?')}</td>
+          const ph = phoneById(b.phone_id);
+          return `<tr><td>${esc(b.name || b.id)}${b.mode === 'ivr' ? ' ' + badge('IVR', 'info', true) : ''}</td><td>${bridgeCameras(b)}</td>
             <td>${esc(ph ? `${ph.username}@${ph.server}` : '?')}</td>
             <td>${phoneBadge(st.phones[b.phone_id])}</td>
-            <td>${!b.enabled ? badge('disabled') : inCall ? badge('in call', 'info') : badge('ready', 'ok')}</td>
+            <td>${bridgeState(b, st)}</td>
             <td><button class="btn small" data-dial="${esc(b.id)}">Call…</button></td></tr>`;
         }).join('')}
       </table></div></div>` : ''}`;
@@ -464,16 +475,17 @@ pages.bridges = async () => {
   const render = () => {
     const st = state.status;
     main().innerHTML = `
-      <div class="page-head"><div><h1>Bridges</h1><p class="muted">Connect a camera to a virtual phone.</p></div>
+      <div class="page-head"><div><h1>Bridges</h1><p class="muted">Connect a virtual phone to one camera, or to a spoken menu of cameras.</p></div>
         <button class="btn primary" id="add-bridge" ${!state.cameras.length || !state.phones.length ? 'disabled title="Add a camera and a phone first"' : ''}>+ New bridge</button></div>
       ${state.bridges.length ? `<div class="grid">${state.bridges.map(b => {
         const cam = camById(b.camera_id), ph = phoneById(b.phone_id);
-        const inCall = st.busy_cameras.includes(b.camera_id);
+        const title = b.name || (b.mode === 'ivr' ? `Camera menu ↔ ${ph?.username || '?'}` : `${cam?.name || '?'} ↔ ${ph?.username || '?'}`);
         return `<div class="card" data-bridge="${esc(b.id)}">
-          <div class="card-row"><h2>${esc(b.name || `${cam?.name || '?'} ↔ ${ph?.username || '?'}`)}</h2>
-            ${!b.enabled ? badge('disabled') : inCall ? badge('in call', 'info') : badge('ready', 'ok')}</div>
+          <div class="card-row"><h2>${esc(title)}</h2>${bridgeState(b, st)}</div>
           <dl class="kv">
-            <dt>Camera</dt><dd>${esc(cam?.name || 'missing')}</dd>
+            ${b.mode === 'ivr'
+              ? `<dt>IVR menu</dt><dd>${bridgeCameras(b)}</dd><dt>Voice</dt><dd>${esc(b.ivr_voice)} · ${esc(b.ivr_speed)} wpm · back to menu: ${esc(b.menu_digit || '-')}</dd>`
+              : `<dt>Camera</dt><dd>${esc(cam?.name || 'missing')}</dd>`}
             <dt>Phone</dt><dd>${esc(ph ? `${ph.name} (${ph.username})` : 'missing')} ${phoneBadge(st.phones[b.phone_id])}</dd>
             <dt>Answer</dt><dd>${b.answer_delay ? `after ${b.answer_delay}s of ringing` : 'immediately'}</dd>
             <dt>Gain</dt><dd>mic ${b.mic_gain_db >= 0 ? '+' : ''}${b.mic_gain_db} dB · speaker ${b.speaker_gain_db >= 0 ? '+' : ''}${b.speaker_gain_db} dB</dd>
@@ -512,16 +524,66 @@ function dtmfRow(a = {}) {
   </div>`;
 }
 
+function ivrRow(o = {}) {
+  const used = o.digit ?? '';
+  return `<div class="ivr-row">
+    <select data-f="digit" aria-label="Digit">${'1234567890'.split('').map(d => `<option ${d === used ? 'selected' : ''}>${d}</option>`).join('')}</select>
+    <select data-f="camera_id" aria-label="Camera">${state.cameras.map(c => `<option value="${esc(c.id)}" ${c.id === o.camera_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
+    <input data-f="label" placeholder="spoken name (default: camera name)" value="${esc(o.label)}">
+    <button type="button" class="icon-btn" data-rm aria-label="Remove">&times;</button>
+  </div>`;
+}
+
+const BRIDGE_DEFAULTS = {
+  enabled: true, mode: 'direct', answer_delay: 0, mic_gain_db: 0, speaker_gain_db: 0, speaker_gate_db: -50,
+  max_call_seconds: 600, allowed_callers: [], dtmf_actions: [], hangup_digit: '', ivr_options: [],
+  ivr_greeting: 'Hello.', ivr_option_text: 'Press {digit} for {name}.', ivr_invalid_text: 'Sorry, that is not a valid choice.',
+  ivr_busy_text: '{name} is busy right now.', ivr_connect_text: 'Connecting to {name}.', ivr_goodbye_text: 'Goodbye.',
+  ivr_voice: 'en-us', ivr_speed: 150, ivr_timeout: 8, ivr_repeats: 3, menu_digit: '*',
+};
+
 function bridgeForm(b) {
-  const x = b || { enabled: true, answer_delay: 0, mic_gain_db: 0, speaker_gain_db: 0, speaker_gate_db: -50, max_call_seconds: 600, allowed_callers: [], dtmf_actions: [], hangup_digit: '' };
+  const x = Object.assign({}, BRIDGE_DEFAULTS, b || {});
   const usedPhones = new Set(state.bridges.filter(o => o.id !== b?.id).map(o => o.phone_id));
+  const opts = x.ivr_options.length ? x.ivr_options : state.cameras.slice(0, 2).map((c, i) => ({ digit: String(i + 1), camera_id: c.id }));
   openModal(b ? 'Edit bridge' : 'New bridge', `
     <form id="bridge-form" autocomplete="off">
       <label>Name <span class="hint">optional</span><input name="name" value="${esc(x.name)}" placeholder="Front door intercom"></label>
       <div class="row">
-        <label>Camera<select name="camera_id" required>${state.cameras.map(c => `<option value="${esc(c.id)}" ${c.id === x.camera_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
         <label>Virtual phone<select name="phone_id" required>${state.phones.map(p => `<option value="${esc(p.id)}" ${p.id === x.phone_id ? 'selected' : ''} ${usedPhones.has(p.id) ? 'disabled' : ''}>${esc(p.name)} (${esc(p.username)})${usedPhones.has(p.id) ? ' - already bridged' : ''}</option>`).join('')}</select></label>
+        <label>When the phone is called<select name="mode">
+          <option value="direct" ${x.mode !== 'ivr' ? 'selected' : ''}>Connect one camera directly</option>
+          <option value="ivr" ${x.mode === 'ivr' ? 'selected' : ''}>Play a menu to pick a camera (IVR)</option>
+        </select></label>
       </div>
+      <div data-mode="direct">
+        <label>Camera<select name="camera_id">${state.cameras.map(c => `<option value="${esc(c.id)}" ${c.id === x.camera_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select></label>
+      </div>
+      <fieldset data-mode="ivr"><legend>IVR menu</legend>
+        <p class="hint muted small" style="margin-top:0">The caller hears e.g. <i>"Press 1 for Front door. Press 2 for Garage."</i> and presses a digit.
+          During the call, the menu digit (default <b>*</b>) goes back to the menu to switch cameras.</p>
+        <div id="ivr-list">${opts.map(ivrRow).join('')}</div>
+        <button type="button" class="btn small" id="ivr-add" style="margin-bottom:12px">+ Add camera to menu</button>
+        <div class="row">
+          <label>Voice / language <span class="hint" id="voice-hint">e.g. en-us, en-gb, tr, de, fr</span>
+            <input name="ivr_voice" list="voice-list" value="${esc(x.ivr_voice)}"><datalist id="voice-list"></datalist></label>
+          <label>Speed (words per minute)<input name="ivr_speed" type="number" min="80" max="300" step="5" value="${esc(x.ivr_speed)}"></label>
+        </div>
+        <label>Greeting<input name="ivr_greeting" value="${esc(x.ivr_greeting)}" placeholder="Welcome to the front door intercom."></label>
+        <label>Each option <span class="hint">{digit} and {name} are filled in</span><input name="ivr_option_text" value="${esc(x.ivr_option_text)}"></label>
+        <details class="more"><summary>More prompts and timing</summary>
+          <label>Invalid choice<input name="ivr_invalid_text" value="${esc(x.ivr_invalid_text)}"></label>
+          <label>Camera busy <span class="hint">{name}</span><input name="ivr_busy_text" value="${esc(x.ivr_busy_text)}"></label>
+          <label>Connecting <span class="hint">{name}; empty = silent</span><input name="ivr_connect_text" value="${esc(x.ivr_connect_text)}"></label>
+          <label>No choice made (before hanging up)<input name="ivr_goodbye_text" value="${esc(x.ivr_goodbye_text)}"></label>
+          <div class="row three">
+            <label>Back-to-menu digit<input name="menu_digit" maxlength="1" value="${esc(x.menu_digit)}"></label>
+            <label>Wait after menu (s)<input name="ivr_timeout" type="number" min="2" max="60" value="${esc(x.ivr_timeout)}"></label>
+            <label>Repeat menu (times)<input name="ivr_repeats" type="number" min="1" max="10" value="${esc(x.ivr_repeats)}"></label>
+          </div>
+        </details>
+        <div class="toolbar" style="margin:4px 0 12px"><button type="button" class="btn small" id="ivr-preview">▶ Preview menu</button><audio id="ivr-audio" controls class="hidden" style="height:32px;flex:1;min-width:200px"></audio></div>
+      </fieldset>
       <fieldset><legend>Answering</legend>
         <div class="row">
           <label>Ring before answering (s)<input name="answer_delay" type="number" min="0" max="60" step="0.5" value="${esc(x.answer_delay)}"></label>
@@ -540,7 +602,7 @@ function bridgeForm(b) {
       </fieldset>
       <fieldset><legend>DTMF</legend>
         <label>Hang-up digit <span class="hint">optional, e.g. #</span><input name="hangup_digit" maxlength="1" value="${esc(x.hangup_digit)}" style="max-width:80px"></label>
-        <div class="hint muted small" style="margin-bottom:6px">Keypad actions: send an HTTP request when a digit is pressed, e.g. open a gate through Home Assistant.</div>
+        <div class="hint muted small" style="margin-bottom:6px">Keypad actions while connected to a camera: send an HTTP request when a digit is pressed, e.g. open a gate through Home Assistant.</div>
         <div id="dtmf-list">${x.dtmf_actions.map(dtmfRow).join('')}</div>
         <button type="button" class="btn small" id="dtmf-add" style="margin-bottom:12px">+ Add action</button>
       </fieldset>
@@ -549,16 +611,44 @@ function bridgeForm(b) {
       <div class="form-actions"><button type="submit" class="btn primary">${b ? 'Save' : 'Create bridge'}</button></div>
     </form>`, body => {
     const form = $('#bridge-form', body);
+    const syncMode = () => $$('[data-mode]', form).forEach(el => el.classList.toggle('hidden', el.dataset.mode !== form.mode.value));
+    form.mode.onchange = syncMode; syncMode();
     const gate = $('#gate-on', form);
     const syncGate = () => { form.speaker_gate_db.disabled = !gate.checked; };
     gate.onchange = syncGate; syncGate();
     const bindRm = () => $$('[data-rm]', form).forEach(btn => btn.onclick = () => btn.parentElement.remove());
     $('#dtmf-add', form).onclick = () => { $('#dtmf-list', form).insertAdjacentHTML('beforeend', dtmfRow()); bindRm(); };
+    $('#ivr-add', form).onclick = () => {
+      const taken = new Set($$('.ivr-row [data-f=digit]', form).map(s => s.value));
+      const digit = '1234567890'.split('').find(d => !taken.has(d)) || '0';
+      $('#ivr-list', form).insertAdjacentHTML('beforeend', ivrRow({ digit, camera_id: state.cameras[0]?.id }));
+      bindRm();
+    };
     bindRm();
+    const ivrOptions = () => $$('.ivr-row', form).map(r => ({
+      digit: $('[data-f=digit]', r).value, camera_id: $('[data-f=camera_id]', r).value, label: $('[data-f=label]', r).value.trim(),
+    }));
+    api('GET', '/ivr/voices').then(v => {
+      $('#voice-list', form).innerHTML = v.voices.map(o => `<option value="${esc(o.id)}">${esc(o.name)}</option>`).join('');
+      if (!v.available) $('#voice-hint', form).textContent = 'text-to-speech unavailable: beeps are played';
+    }).catch(() => {});
+    $('#ivr-preview', form).onclick = e => busy(e.target, async () => {
+      const f = readForm(form);
+      const blob = await api('POST', '/ivr/preview', {
+        ivr_options: ivrOptions(), ivr_greeting: f.ivr_greeting, ivr_option_text: f.ivr_option_text,
+        ivr_voice: f.ivr_voice, ivr_speed: f.ivr_speed || 150,
+      });
+      const audio = $('#ivr-audio', form);
+      audio.src = URL.createObjectURL(blob);
+      audio.classList.remove('hidden');
+      audio.play().catch(() => {});
+    });
     form.onsubmit = e => {
       e.preventDefault();
       const data = readForm(form);
       data.speaker_gate_db = gate.checked ? data.speaker_gate_db : null;
+      data.ivr_options = ivrOptions();
+      if (data.mode === 'ivr' && !data.camera_id) data.camera_id = '';
       data.dtmf_actions = $$('.dtmf-row', form).map(r => ({
         digit: $('[data-f=digit]', r).value.trim(), method: $('[data-f=method]', r).value,
         url: $('[data-f=url]', r).value.trim(), hangup: $('[data-f=hangup]', r).checked,
@@ -577,9 +667,12 @@ function bridgeForm(b) {
 }
 
 function dialDialog(bridgeId) {
+  const b = state.bridges.find(x => x.id === bridgeId);
+  const ivr = b && b.mode === 'ivr';
   openModal('Call from camera', `
     <form id="dial-form">
       <p class="muted" style="margin-top:0">The virtual phone calls this number. When it's answered, the camera audio is bridged (intercom / doorbell style).</p>
+      ${ivr ? `<label>Camera<select name="camera_id">${b.ivr_options.map(o => `<option value="${esc(o.camera_id)}">${esc(o.digit)} · ${esc(optionName(o))}</option>`).join('')}</select></label>` : ''}
       <label>Number or SIP URI<input name="target" required placeholder="1001"></label>
       <div class="form-actions"><button class="btn primary" type="submit">Call</button></div>
     </form>`, body => {
@@ -587,7 +680,7 @@ function dialDialog(bridgeId) {
     form.onsubmit = e => {
       e.preventDefault();
       busy($('[type=submit]', form), async () => {
-        await api('POST', `/bridges/${bridgeId}/call`, { target: form.target.value.trim() });
+        await api('POST', `/bridges/${bridgeId}/call`, { target: form.target.value.trim(), camera_id: form.camera_id?.value });
         closeModal();
         toast('Calling…', 'ok');
       });
@@ -695,7 +788,8 @@ pages.call = async id => {
     onStatus: m => {
       const mic = m.mic || {}, spk = m.speaker || {};
       $('#call-stats').innerHTML = `
-        <dt>Camera mic</dt><dd>${mic.connected ? badge(`live ${mic.codec || ''}`, 'ok') : badge(mic.error || 'connecting', mic.error ? 'bad' : 'warn')}</dd>
+        ${m.phase === 'menu' ? `<dt>IVR</dt><dd>${badge('caller is in the menu', 'info')}</dd>` : ''}
+      <dt>Camera mic</dt><dd>${m.phase === 'menu' ? badge('-', '', true) : mic.connected ? badge(`live ${mic.codec || ''}`, 'ok') : badge(mic.error || 'connecting', mic.error ? 'bad' : 'warn')}</dd>
         <dt>Camera speaker</dt><dd>${spk.state === 'connected' ? badge(spk.gate_open ? 'talking' : 'connected', spk.gate_open ? 'info' : 'ok') : badge(spk.state === 'none' ? 'not available' : spk.state, spk.state === 'error' ? 'bad' : '')}</dd>`;
       if (spk.state === 'none') { ptt.disabled = openMic.disabled = true; ptt.querySelector('.ptt-label').textContent = 'No speaker'; }
     },

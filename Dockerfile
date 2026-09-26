@@ -4,6 +4,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     CAM2SIP_DATA_DIR=/data
 
+# espeak-ng: offline text-to-speech for IVR menu prompts
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends espeak-ng \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

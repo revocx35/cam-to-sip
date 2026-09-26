@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
 from .. import onvif
+from ..media import tts as tts_mod
 from ..engine import CameraBusy, Engine
 from ..logbuffer import LogBuffer
 from ..models import SECRET_FIELDS, Bridge, Camera, Phone, redact
@@ -43,6 +44,16 @@ class ChangePasswordBody(BaseModel):
 
 class DialBody(BaseModel):
     target: str
+    camera_id: str | None = None
+
+
+class IvrPreviewBody(BaseModel):
+    ivr_options: list[dict] = []
+    ivr_greeting: str = ""
+    ivr_option_text: str = "Press {digit} for {name}."
+    ivr_voice: str = "en-us"
+    ivr_speed: int = 150
+    text: str | None = None       # speak this instead of the composed menu
 
 
 class DiscoverBody(BaseModel):
@@ -206,7 +217,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ValidationError as e:
             first = e.errors()[0]
             field = ".".join(str(x) for x in first.get("loc", []))
-            raise HTTPException(422, f"{field}: {first.get('msg')}") from e
+            msg = str(first.get("msg", "")).removeprefix("Value error, ")
+            raise HTTPException(422, f"{field}: {msg}" if field else msg) from e
 
     async def save_and_apply():
         store.save()
@@ -256,7 +268,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.delete("/api/cameras/{cid}")
     async def delete_camera(cid: str):
         cam = find(cfg.cameras, cid)
-        used = [b.name or b.id for b in cfg.bridges if b.camera_id == cid]
+        used = [b.name or b.id for b in cfg.bridges if cid in b.camera_ids()]
         if used:
             raise HTTPException(409, f"camera is used by bridge(s): {', '.join(used)}")
         cfg.cameras.remove(cam)
@@ -353,8 +365,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # -- bridges --------------------------------------------------------------------------------
     def check_bridge(b: Bridge, exclude: str | None = None) -> None:
-        if not store.camera(b.camera_id):
-            raise HTTPException(422, "camera_id: unknown camera")
+        for cid in b.camera_ids():
+            if not store.camera(cid):
+                raise HTTPException(422, "camera_id: unknown camera")
         if not store.phone(b.phone_id):
             raise HTTPException(422, "phone_id: unknown phone")
         other = next((x for x in cfg.bridges if x.phone_id == b.phone_id and x.id != exclude), None)
@@ -397,12 +410,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not target:
             raise HTTPException(422, "target is required")
         try:
-            call = await engine.dial(bid, target)
+            call = await engine.dial(bid, target, body.camera_id or None)
         except CameraBusy as e:
             raise HTTPException(409, str(e)) from e
         except ValueError as e:
             raise HTTPException(409, str(e)) from e
         return {"call_id": call.id}
+
+    # -- IVR prompts --------------------------------------------------------------------------------
+    @app.get("/api/ivr/voices")
+    async def ivr_voices():
+        return {"available": engine.tts.available, "voices": await engine.tts.voices()}
+
+    @app.post("/api/ivr/preview")
+    async def ivr_preview(body: IvrPreviewBody):
+        """Render the spoken menu (or `text`) as a WAV file for the browser."""
+        if body.text is not None:
+            text = body.text
+        else:
+            names = []
+            for o in body.ivr_options:
+                cam = store.camera(str(o.get("camera_id", "")))
+                label = str(o.get("label") or "").strip() or (cam.name if cam else "camera")
+                names.append((str(o.get("digit", "?")), label))
+            text = tts_mod.menu_text(body.ivr_greeting, body.ivr_option_text, names)
+        speed = max(80, min(300, body.ivr_speed))
+        data = await engine.tts.wav(text[:2000], body.ivr_voice or "en-us", speed)
+        return Response(data, media_type="audio/wav", headers={"Cache-Control": "no-store"})
 
     # -- calls ----------------------------------------------------------------------------------
     @app.get("/api/calls")

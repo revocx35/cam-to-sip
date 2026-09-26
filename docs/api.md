@@ -89,13 +89,16 @@ Camera object:
 | POST | `/bridges` | create (`409` if the phone is already bridged) |
 | PUT | `/bridges/{id}` | update |
 | DELETE | `/bridges/{id}` | delete |
-| POST | `/bridges/{id}/call` | `{"target": "600"}`: the camera calls a number or SIP URI → `{"call_id"}` (`409` if the camera is busy or the phone isn't registered) |
+| POST | `/bridges/{id}/call` | `{"target": "600", "camera_id": "…"}`: the camera calls a number or SIP URI → `{"call_id"}`. `camera_id` is optional (IVR bridges: which menu camera; default the first). `409` if the camera is busy or the phone isn't registered |
+| GET | `/ivr/voices` | `{"available": true, "voices": [{"id": "en-us", "name": "English (America)"}, …]}` (espeak-ng voices) |
+| POST | `/ivr/preview` | bridge-like body (`ivr_options`, `ivr_greeting`, `ivr_option_text`, `ivr_voice`, `ivr_speed`) or `{"text": "…", "ivr_voice": "tr"}` → `audio/wav` of the spoken menu |
 
 ```json
 {
   "name": "Front door",
   "enabled": true,
-  "camera_id": "a1b2c3d4",
+  "mode": "direct",             // "direct" (one camera) or "ivr" (spoken menu of cameras)
+  "camera_id": "a1b2c3d4",      // direct mode
   "phone_id": "e5f6a7b8",
   "answer_delay": 0,            // seconds of ringing before auto-answer
   "mic_gain_db": 0,             // camera -> phone
@@ -109,6 +112,31 @@ Camera object:
   ]
 }
 ```
+
+IVR bridge (`mode: "ivr"`), in addition to the common fields above:
+
+```json
+{
+  "mode": "ivr",
+  "ivr_options": [
+    {"digit": "1", "camera_id": "a1b2c3d4", "label": ""},            // label = spoken name, default camera name
+    {"digit": "2", "camera_id": "c9d8e7f6", "label": "the garage"}
+  ],
+  "ivr_greeting": "Hello.",
+  "ivr_option_text": "Press {digit} for {name}.",
+  "ivr_invalid_text": "Sorry, that is not a valid choice.",
+  "ivr_busy_text": "{name} is busy right now.",
+  "ivr_connect_text": "Connecting to {name}.",   // "" = connect silently
+  "ivr_goodbye_text": "Goodbye.",
+  "ivr_voice": "en-us",                          // any espeak-ng voice: en-gb, de, fr, tr, …
+  "ivr_speed": 150,                              // words per minute, 80-300
+  "ivr_timeout": 8,                              // seconds to wait after the menu
+  "ivr_repeats": 3,                              // menu repetitions before hanging up
+  "menu_digit": "*"                              // during a camera call: back to the menu
+}
+```
+
+Menu digits are `0`-`9` and must be unique; `menu_digit` must not be one of them.
 
 ### Browser calls (WebSockets)
 

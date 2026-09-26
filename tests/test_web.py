@@ -83,3 +83,26 @@ def test_camera_sources():
     assert Camera(name="t", kind="tapo", host="h").talk_source() == ""
     onvif = Camera(name="o", kind="onvif", host="h", stream_path="/onvif/profile1?x=1")
     assert onvif.talk_source() == onvif.mic_source() == "rtsp://h:554/onvif/profile1?x=1"
+
+
+def test_ivr_bridge_api(client):
+    client.post("/api/setup", json={"password": "secret1"})
+    a = client.post("/api/cameras", json={"name": "Front", "kind": "tapo", "host": "10.0.0.5"}).json()
+    b = client.post("/api/cameras", json={"name": "Garage", "kind": "tapo", "host": "10.0.0.6"}).json()
+    ph = client.post("/api/phones", json={"name": "P", "server": "127.0.0.1", "port": 9, "username": "1"}).json()
+    bad = client.post("/api/bridges", json={"phone_id": ph["id"], "mode": "ivr", "ivr_options": [
+        {"digit": "1", "camera_id": a["id"]}, {"digit": "1", "camera_id": b["id"]}]})
+    assert bad.status_code == 422 and "only be used once" in bad.json()["detail"]
+    missing = client.post("/api/bridges", json={"phone_id": ph["id"], "mode": "ivr", "ivr_options": [
+        {"digit": "1", "camera_id": "nope"}]})
+    assert missing.status_code == 422
+    ok = client.post("/api/bridges", json={"phone_id": ph["id"], "mode": "ivr", "ivr_voice": "en-us", "ivr_options": [
+        {"digit": "1", "camera_id": a["id"]}, {"digit": "2", "camera_id": b["id"], "label": "the garage"}]})
+    assert ok.status_code == 200 and ok.json()["mode"] == "ivr"
+    assert client.delete(f"/api/cameras/{b['id']}").status_code == 409     # used by the menu
+    wav = client.post("/api/ivr/preview", json=ok.json())
+    assert wav.status_code == 200 and wav.content[:4] == b"RIFF"
+    voices = client.get("/api/ivr/voices").json()
+    assert "voices" in voices
+    r = client.post(f"/api/bridges/{ok.json()['id']}/call", json={"target": "100", "camera_id": "other"})
+    assert r.status_code == 409   # phone not registered (checked before camera membership is irrelevant)

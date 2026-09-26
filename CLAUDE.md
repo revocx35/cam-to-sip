@@ -24,6 +24,11 @@ docker run --rm -v $PWD:/app -w /app cam2sip-dev python -m pytest -q          # 
 docker run --rm --network host -v $PWD:/app -w /app cam2sip-dev \
   python tools/sip_test_call.py --server <pbx> --user <ext> --password <secret> --target <bridged-ext>
 
+# IVR: press keys during a live call (choose 2, back to menu, choose 1)
+docker run --rm --network host -v $PWD:/app -w /app cam2sip-dev \
+  python tools/sip_test_call.py --server <host> --port 5062 --user tester \
+  --target <contact_user>@<host>:5062 --dtmf 2,*,1 --dtmf-interval 5
+
 # browser call smoke test (Firefox + fake mic + PulseAudio; full docker command in the docstring)
 python tools/browser_call_test.py --password <admin> --camera <camera-id>
 
@@ -37,7 +42,8 @@ Local test-environment details (PBX, camera, credentials, where it's deployed) l
 
 - `cam2sip/sip/`: own SIP stack. `message.py` parses/builds, `auth.py` does digest, `sdp.py` handles SDP, `stack.py` has UDP + transactions, `ua.py` has accounts + calls.
 - `cam2sip/media/`: `g711.py` (tables), `rtp.py` (RTP socket, `Pacer` jitter buffer), `rtsp.py` (mic client + talk server for go2rtc).
-- `cam2sip/engine.py`: `Engine` (config → go2rtc streams + SIP accounts, call routing), `CameraLink` (camera side of any call: mic, speaker, gate, keep-alive) and `BridgeSession` (SIP call ↔ CameraLink).
+- `cam2sip/engine.py`: `Engine` (config → go2rtc streams + SIP accounts, call routing), `CameraLink` (camera side of any call: mic, speaker, gate, keep-alive) and `BridgeSession` (SIP call ↔ CameraLink, plus the IVR menu phases: menu ↔ connected).
+- `cam2sip/media/tts.py` (espeak-ng prompts) and `media/dtmf.py` (in-band Goertzel detector) serve the IVR.
 - `cam2sip/webcall.py`: `WebCall` (browser call over `WS /api/cameras/{id}/talk` ↔ CameraLink). The video WS proxy lives in `web/app.py`.
 - `cam2sip/web/`: FastAPI app plus a no-build vanilla-JS SPA in `static/`.
 - `cam2sip/models.py` / `store.py`: pydantic config persisted to `/data/config.json`.
@@ -71,6 +77,9 @@ Local test-environment details (PBX, camera, credentials, where it's deployed) l
 - FastAPI's `@app.middleware("http")` does **not** run for WebSockets. WS endpoints must check the session cookie themselves (`ws_authed`).
 - Headless browser testing: Playwright's Chromium has **no H.264** (MSE unsupported, so the page shows snapshots), and in a container its `audioWorklet.addModule()` never resolves (so `call.js` falls back to a ScriptProcessor after 4 s). Headless Firefox's AudioContext stays `suspended` without an audio device. Run PulseAudio with a null sink in the container, then Firefox exercises the full path (worklet + MSE).
 - The keep-alive for go2rtc's talk source is timer-driven (`CameraLink._keepalive`), because browsers send nothing while push-to-talk is released.
+- `espeak-ng --stdout` writes a WAV header with bogus sizes. `tts._parse_wav` reads the `data` chunk to EOF instead of trusting `wave`.
+- IVR prompts must win over camera audio on the same 20 ms clock (`BridgeSession._to_phone`). Barge-in means `_on_dtmf` in the menu phase calls `_stop_prompt()`, and a digit queued during an announcement skips the next menu replay (`test_ivr.py` covers this).
+- **Testing live without disturbing production:** run a local instance whose virtual phone points at a dead PBX (e.g. `127.0.0.1:9`), so it never registers the real extension (FreePBX `max_contacts=1` would steal the registration). Then INVITE it directly with `tools/sip_test_call.py --server <this host> --port 5062 --target <contact_user>@<host>:5062`. Inbound INVITEs are routed by the phone's `contact_user`.
 - Client-transaction lingering uses `loop.call_later`, not sleeping tasks. Sleeping tasks made every test take 32 s and slowed shutdown.
 
 ## Release

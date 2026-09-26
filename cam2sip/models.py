@@ -6,7 +6,7 @@ import secrets
 from typing import Literal
 from urllib.parse import quote
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 SECRET_FIELDS = {"password", "cloud_password"}
 
@@ -100,12 +100,35 @@ class DtmfAction(BaseModel):
     hangup: bool = False
 
 
+class IvrOption(BaseModel):
+    digit: str = Field(pattern=r"^[0-9]$")
+    camera_id: str
+    label: str = ""                 # spoken name; defaults to the camera name
+
+
+DIGITS = "0123456789*#"
+
+
 class Bridge(BaseModel):
     id: str = Field(default_factory=new_id)
     name: str = ""
     enabled: bool = True
-    camera_id: str
+    mode: Literal["direct", "ivr"] = "direct"
+    camera_id: str = ""             # direct mode
     phone_id: str
+    # IVR mode: the caller hears a spoken menu and picks a camera with a digit
+    ivr_options: list[IvrOption] = Field(default_factory=list)
+    ivr_greeting: str = "Hello."
+    ivr_option_text: str = "Press {digit} for {name}."
+    ivr_invalid_text: str = "Sorry, that is not a valid choice."
+    ivr_busy_text: str = "{name} is busy right now."
+    ivr_connect_text: str = "Connecting to {name}."
+    ivr_goodbye_text: str = "Goodbye."
+    ivr_voice: str = "en-us"        # espeak-ng voice, e.g. en-us, en-gb, tr, de
+    ivr_speed: int = Field(default=150, ge=80, le=300)   # words per minute
+    ivr_timeout: float = Field(default=8.0, ge=2, le=60)  # wait after the menu before repeating
+    ivr_repeats: int = Field(default=3, ge=1, le=10)
+    menu_digit: str = "*"           # IVR: during a camera call, go back to the menu
     answer_delay: float = Field(default=0.0, ge=0, le=60)
     mic_gain_db: float = Field(default=0.0, ge=-20, le=30)       # camera -> phone
     speaker_gain_db: float = Field(default=0.0, ge=-20, le=30)   # phone -> camera
@@ -114,6 +137,28 @@ class Bridge(BaseModel):
     allowed_callers: list[str] = Field(default_factory=list)
     hangup_digit: str = ""
     dtmf_actions: list[DtmfAction] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _check_mode(self) -> "Bridge":
+        if self.mode == "direct" and not self.camera_id:
+            raise ValueError("camera_id: a camera is required")
+        if self.mode == "ivr":
+            if not self.ivr_options:
+                raise ValueError("ivr_options: add at least one menu option")
+            digits = [o.digit for o in self.ivr_options]
+            if len(set(digits)) != len(digits):
+                raise ValueError("ivr_options: each digit can only be used once")
+            if self.menu_digit and self.menu_digit in digits:
+                raise ValueError("menu_digit: must differ from the menu option digits")
+        for d in (self.menu_digit, self.hangup_digit):
+            if d and d not in DIGITS:
+                raise ValueError(f"invalid DTMF digit {d!r}")
+        return self
+
+    def camera_ids(self) -> list[str]:
+        if self.mode == "ivr":
+            return [o.camera_id for o in self.ivr_options]
+        return [self.camera_id]
 
 
 class Settings(BaseModel):

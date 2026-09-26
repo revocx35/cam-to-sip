@@ -144,6 +144,15 @@ class RtpEndpoint(asyncio.DatagramProtocol):
         self.tx_packets += 1
         self.tx_bytes += len(payload)
 
+    def send_event(self, pt: int, payload: bytes, ts: int, marker: bool = False) -> None:
+        """Send a packet with an explicit timestamp (RFC 4733 events share one)."""
+        if not self.transport or not self.remote or not self.send_enabled:
+            return
+        pkt = RtpPacket(pt, self.sender.seq, ts, self.sender.ssrc, marker, payload)
+        self.sender.seq = (self.sender.seq + 1) & 0xFFFF
+        self.transport.sendto(pkt.to_bytes(), self.remote)
+        self.tx_packets += 1
+
     def close(self) -> None:
         if self.transport:
             self.transport.close()

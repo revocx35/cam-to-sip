@@ -10,7 +10,8 @@ import time
 import httpx
 
 from .go2rtc import Go2rtc, summarize_probe
-from .media import g711
+from .media import g711, tts
+from .media.dtmf import DtmfDetector
 from .media.rtp import Pacer, PortAllocator, RtpPacket
 from .media.rtsp import RtspAudioClient, TalkServer
 from .models import Bridge, Camera
@@ -142,17 +143,31 @@ class CameraLink:
 
 
 class BridgeSession:
-    """Media plumbing for one SIP call: camera mic -> phone, phone -> camera speaker."""
+    """One SIP call on a bridge: camera audio <-> phone, plus the optional IVR menu.
 
-    def __init__(self, engine: "Engine", bridge: Bridge, camera: Camera, call: Call):
+    Phases: "menu" (IVR prompt playing / waiting for a digit) and "connected"
+    (a camera is attached through a CameraLink). In IVR mode the caller can go
+    back to the menu with the bridge's menu digit and pick another camera.
+    """
+
+    def __init__(self, engine: "Engine", bridge: Bridge, call: Call, camera: Camera | None = None):
         self.engine = engine
         self.bridge = bridge
-        self.camera = camera
         self.call = call
+        self.initial_camera = camera     # direct mode / outbound: connect right away
+        self.camera: Camera | None = None
+        self.link: CameraLink | None = None
+        self.phase = "starting"
         self.pacer: Pacer | None = None
-        self.link = CameraLink(engine, camera, self._on_mic)
         self.tasks: list[asyncio.Task] = []
+        self.visited: list[str] = []
+        self._prompt = b""
+        self._prompt_pos = 0
+        self._prompt_done = asyncio.Event()
+        self._prompt_done.set()
+        self._digits: asyncio.Queue[str] = asyncio.Queue()
         self._last_dtmf_ts: int | None = None
+        self._inband: DtmfDetector | None = None
         self.started = time.time()
 
     @property
@@ -163,30 +178,141 @@ class BridgeSession:
         call = self.call
         self.pacer = Pacer(self._to_phone, g711.SILENCE.get(self.phone_codec, 0xD5))
         self.pacer.start()
-        self.link.start()
         if call.rtp:
             call.rtp.on_packet = self._on_phone_rtp
-        self.tasks.append(asyncio.create_task(self._watchdog()))
         call.on_dtmf = self._on_dtmf
+        self.tasks.append(asyncio.create_task(self._watchdog()))
+        if self.initial_camera:
+            self._connect(self.initial_camera)
+        else:
+            self._start_menu()
 
     async def stop(self) -> None:
         for t in self.tasks:
             t.cancel()
         if self.pacer:
             self.pacer.stop()
-        await self.link.stop()
+        await self._disconnect()
 
-    # -- camera -> phone -------------------------------------------------------------
+    # -- camera attach / detach -------------------------------------------------------
+    def _connect(self, camera: Camera) -> None:
+        """Attach a camera (the caller must already hold engine.busy[camera.id])."""
+        self.camera = camera
+        self.link = CameraLink(self.engine, camera, self._on_mic)
+        self.link.start()
+        if self.pacer:
+            self.pacer.buf.clear()
+            self.pacer.primed = False
+        self.phase = "connected"
+        if not self.visited or self.visited[-1] != camera.name:
+            self.visited.append(camera.name)
+
+    async def _disconnect(self) -> None:
+        link, cam = self.link, self.camera
+        self.link, self.camera = None, None
+        if link:
+            await link.stop()
+        if cam and self.engine.busy.get(cam.id) is self.call:
+            del self.engine.busy[cam.id]
+
+    # -- camera -> phone (with prompts taking priority) -------------------------------------
     def _on_mic(self, codec: str, payload: bytes) -> None:
-        if self.pacer and self.call.codec:
+        if self.pacer and self.call.codec and self.phase == "connected":
             self.pacer.push(g711.convert(payload, codec, self.phone_codec, self.bridge.mic_gain_db))
 
     def _to_phone(self, frame: bytes) -> None:
+        if self._prompt:
+            chunk = self._prompt[self._prompt_pos:self._prompt_pos + 160]
+            self._prompt_pos += 160
+            if self._prompt_pos >= len(self._prompt):
+                self._stop_prompt()
+            if len(chunk) < 160:
+                chunk += bytes([g711.SILENCE.get(self.phone_codec, 0xD5)]) * (160 - len(chunk))
+            frame = chunk
         call = self.call
         if call.state == "active" and call.rtp and call.negotiated:
             call.rtp.send(call.negotiated.remote_pt, frame, len(frame))
 
-    # -- phone -> camera ---------------------------------------------------------------
+    def _play(self, audio: bytes) -> None:
+        self._prompt, self._prompt_pos = audio, 0
+        if audio:
+            self._prompt_done.clear()
+        else:
+            self._prompt_done.set()
+
+    def _stop_prompt(self) -> None:
+        self._prompt = b""
+        self._prompt_done.set()
+
+    async def _say(self, text: str) -> None:
+        if not text.strip():
+            return
+        b = self.bridge
+        self._play(await self.engine.tts.encoded(text, b.ivr_voice, b.ivr_speed, self.phone_codec))
+        await self._prompt_done.wait()
+
+    # -- IVR menu ----------------------------------------------------------------------------
+    def _label(self, opt) -> str:
+        cam = self.engine.store.camera(opt.camera_id)
+        return opt.label.strip() or (cam.name if cam else f"camera {opt.digit}")
+
+    def _start_menu(self) -> None:
+        self.phase = "menu"
+        while not self._digits.empty():
+            self._digits.get_nowait()
+        self.tasks.append(asyncio.create_task(self._menu_loop()))
+
+    async def _wait_digit(self, timeout: float) -> str | None:
+        try:
+            return await asyncio.wait_for(self._digits.get(), timeout)
+        except TimeoutError:
+            return None
+
+    async def _menu_loop(self) -> None:
+        b = self.bridge
+        engine = self.engine
+        await self.call.answered.wait()
+        await asyncio.sleep(0.4)          # let the media path settle before speaking
+        options = {o.digit: o for o in b.ivr_options}
+        text = tts.menu_text(b.ivr_greeting, b.ivr_option_text, [(o.digit, self._label(o)) for o in b.ivr_options])
+        menu_audio = await engine.tts.encoded(text, b.ivr_voice, b.ivr_speed, self.phone_codec)
+        for _ in range(b.ivr_repeats):
+            if self.call.state != "active":
+                return
+            if self._digits.empty():          # a key pressed during the last prompt skips the menu
+                self._play(menu_audio)
+            digit = await self._wait_digit(len(menu_audio) / 8000 + b.ivr_timeout)
+            if digit is None:
+                continue
+            self._stop_prompt()
+            opt = options.get(digit)
+            cam = engine.store.camera(opt.camera_id) if opt else None
+            if not opt or not cam or not cam.enabled:
+                log.info("IVR: invalid choice %s", digit)
+                await self._say(b.ivr_invalid_text)
+                continue
+            name = self._label(opt)
+            if cam.id in engine.busy:
+                log.info("IVR: %s is busy", cam.name)
+                await self._say(tts.fill(b.ivr_busy_text, name=name))
+                continue
+            engine.busy[cam.id] = self.call
+            log.info("IVR: caller %s chose %s -> %s", self.call.remote_user or "?", digit, cam.name)
+            self._connect(cam)             # camera connects while the confirmation plays
+            await self._say(tts.fill(b.ivr_connect_text, name=name))
+            return
+        if self.call.state == "active":
+            await self._say(b.ivr_goodbye_text)
+            await self.call.hangup("no menu selection")
+
+    async def _back_to_menu(self) -> None:
+        if self.phase != "connected":
+            return
+        self.phase = "menu"
+        await self._disconnect()
+        self._start_menu()
+
+    # -- phone -> camera -----------------------------------------------------------------------
     def _on_phone_rtp(self, pkt: RtpPacket) -> None:
         call = self.call
         neg = call.negotiated
@@ -195,7 +321,16 @@ class BridgeSession:
         if neg.dtmf_pt is not None and pkt.pt == neg.dtmf_pt:
             self._rtp_dtmf(pkt)
             return
-        if pkt.pt == neg.remote_pt:
+        if pkt.pt != neg.remote_pt:
+            return
+        if neg.dtmf_pt is None:          # no RFC 4733 negotiated: listen for key tones in the audio
+            if self._inband is None:
+                self._inband = DtmfDetector()
+            table = g711.DECODE[self.phone_codec]
+            digit = self._inband.feed([table[x] for x in pkt.payload])
+            if digit:
+                self._on_dtmf(digit)
+        if self.phase == "connected" and self.link:
             self.link.speak(pkt.payload, self.phone_codec, self.bridge.speaker_gain_db,
                             self.bridge.speaker_gate_db)
 
@@ -209,8 +344,15 @@ class BridgeSession:
             self._on_dtmf(DTMF_EVENTS[event])
 
     def _on_dtmf(self, digit: str) -> None:
-        log.info("[%s] DTMF %s", self.camera.name, digit)
+        log.info("[%s] DTMF %s", self.camera.name if self.camera else "menu", digit)
+        if self.phase == "menu":
+            self._digits.put_nowait(digit)
+            self._stop_prompt()               # barge-in: a key press cuts any prompt short
+            return
         b = self.bridge
+        if b.mode == "ivr" and b.menu_digit and digit == b.menu_digit:
+            asyncio.create_task(self._back_to_menu())
+            return
         hang = b.hangup_digit and digit == b.hangup_digit
         for action in b.dtmf_actions:
             if action.digit == digit:
@@ -244,9 +386,14 @@ class BridgeSession:
                 return
 
     def info(self) -> dict:
-        info = self.link.info()
-        info["mic"]["underruns"] = self.pacer.underruns if self.pacer else 0
-        info["mic"]["buffer_ms"] = int(len(self.pacer.buf) / 8) if self.pacer else 0
+        if self.link:
+            info = self.link.info()
+            info["mic"]["underruns"] = self.pacer.underruns if self.pacer else 0
+            info["mic"]["buffer_ms"] = int(len(self.pacer.buf) / 8) if self.pacer else 0
+        else:
+            info = {"mic": {"connected": False, "codec": None, "error": None},
+                    "speaker": {"state": "none", "codec": None, "packets": 0, "gate_open": False}}
+        info["phase"] = self.phase
         return info
 
 
@@ -260,6 +407,7 @@ class Engine:
         self.ua.on_incoming = self.on_incoming
         self.go2rtc = Go2rtc(settings.go2rtc_api, settings.go2rtc_rtsp)
         self.talk_server = TalkServer("127.0.0.1", settings.talk_port)
+        self.tts = tts.Tts()
         self.busy: dict[str, Call] = {}                # camera id -> call
         self.sessions: dict[str, BridgeSession] = {}   # call id -> session
         self.call_meta: dict[str, dict] = {}           # call id -> bridge/camera/phone ids
@@ -308,6 +456,21 @@ class Engine:
             for p in cfg.phones if p.enabled
         ]
         await self.ua.set_accounts(accounts)
+        asyncio.create_task(self._prewarm_prompts())
+
+    async def _prewarm_prompts(self) -> None:
+        """Synthesize IVR menus ahead of time so callers don't wait for TTS."""
+        for b in self.store.config.bridges:
+            if b.mode != "ivr" or not b.enabled:
+                continue
+            names = []
+            for o in b.ivr_options:
+                cam = self.store.camera(o.camera_id)
+                names.append((o.digit, o.label.strip() or (cam.name if cam else o.digit)))
+            try:
+                await self.tts.pcm(tts.menu_text(b.ivr_greeting, b.ivr_option_text, names), b.ivr_voice, b.ivr_speed)
+            except Exception as e:
+                log.debug("prompt prewarm failed: %s", e)
 
     # -- calls ----------------------------------------------------------------------------
     def _phone_for_account(self, account_id: str):
@@ -316,28 +479,35 @@ class Engine:
     async def on_incoming(self, call: Call) -> None:
         phone = self._phone_for_account(call.account.cfg.id)
         bridge = self.store.bridge_for_phone(phone.id) if phone else None
-        camera = self.store.camera(bridge.camera_id) if bridge else None
         who = call.remote_user or "unknown"
-        if not bridge or not bridge.enabled or not camera or not camera.enabled:
+        if not bridge or not bridge.enabled:
             log.info("call from %s to %s rejected: no active bridge", who, call.account.cfg.username)
             call.reject(480, "Temporarily Unavailable")
-            self._record(call, bridge, camera)
+            self._record(call, bridge)
             return
         if bridge.allowed_callers and who not in bridge.allowed_callers:
             log.info("call from %s rejected: caller not allowed on bridge %s", who, bridge.name)
             call.reject(403, "Forbidden")
-            self._record(call, bridge, camera)
+            self._record(call, bridge)
             return
-        if camera.id in self.busy:
-            log.info("call from %s rejected: camera %s busy", who, camera.name)
-            call.reject(486, "Busy Here")
-            self._record(call, bridge, camera)
-            return
-        self.busy[camera.id] = call
-        session = BridgeSession(self, bridge, camera, call)
-        self._attach(call, session, bridge, camera)
+        camera = None
+        if bridge.mode == "direct":
+            camera = self.store.camera(bridge.camera_id)
+            if not camera or not camera.enabled:
+                log.info("call from %s rejected: camera missing or disabled", who)
+                call.reject(480, "Temporarily Unavailable")
+                self._record(call, bridge)
+                return
+            if camera.id in self.busy:
+                log.info("call from %s rejected: camera %s busy", who, camera.name)
+                call.reject(486, "Busy Here")
+                self._record(call, bridge, [camera.name])
+                return
+            self.busy[camera.id] = call
+        session = BridgeSession(self, bridge, call, camera)
+        self._attach(call, session, bridge)
         call.ring()
-        await session.start()   # connect camera audio while ringing
+        await session.start()   # connect camera audio (or prepare the menu) while ringing
         if bridge.answer_delay > 0:
             try:
                 await asyncio.wait_for(asyncio.shield(call.ended.wait()), bridge.answer_delay)
@@ -345,14 +515,18 @@ class Engine:
                 pass
         if call.state == "ringing":
             await call.answer()
-            log.info("call from %s answered on bridge '%s' (camera %s, %s)",
-                     who, bridge.name or bridge.id, camera.name, call.codec)
+            log.info("call from %s answered on bridge '%s' (%s, %s)", who, bridge.name or bridge.id,
+                     f"camera {camera.name}" if camera else "IVR menu", call.codec)
 
-    async def dial(self, bridge_id: str, target: str) -> Call:
+    async def dial(self, bridge_id: str, target: str, camera_id: str | None = None) -> Call:
         bridge = self.store.bridge(bridge_id)
         if not bridge:
             raise KeyError("bridge not found")
-        camera = self.store.camera(bridge.camera_id)
+        ids = bridge.camera_ids()
+        cid = camera_id or ids[0]
+        if cid not in ids:
+            raise ValueError("that camera is not part of this bridge")
+        camera = self.store.camera(cid)
         account = self.ua.accounts.get(bridge.phone_id)
         if not camera or not account:
             raise ValueError("bridge camera or phone is missing/disabled")
@@ -362,11 +536,11 @@ class Engine:
             raise CameraBusy(f"camera {camera.name} is already in a call")
         call = await account.dial(target)
         self.busy[camera.id] = call
-        session = BridgeSession(self, bridge, camera, call)
-        self._attach(call, session, bridge, camera)
+        session = BridgeSession(self, bridge, call, camera)
+        self._attach(call, session, bridge)
         await session.start()
         asyncio.create_task(self._ring_timeout(call))
-        log.info("calling %s from bridge '%s'", target, bridge.name or bridge.id)
+        log.info("calling %s from bridge '%s' (camera %s)", target, bridge.name or bridge.id, camera.name)
         return call
 
     async def _ring_timeout(self, call: Call) -> None:
@@ -376,9 +550,9 @@ class Engine:
             if call.state == "ringing":
                 await call.hangup("no answer")
 
-    def _attach(self, call: Call, session: BridgeSession, bridge: Bridge, camera: Camera) -> None:
+    def _attach(self, call: Call, session: BridgeSession, bridge: Bridge) -> None:
         self.sessions[call.id] = session
-        self.call_meta[call.id] = {"bridge": bridge, "camera": camera}
+        self.call_meta[call.id] = {"bridge": bridge}
 
         def ended(c: Call) -> None:
             asyncio.create_task(self._cleanup(c))
@@ -390,20 +564,20 @@ class Engine:
         session = self.sessions.pop(call.id, None)
         meta = self.call_meta.pop(call.id, {})
         if session:
-            await session.stop()
-        cam = meta.get("camera")
-        if cam and self.busy.get(cam.id) is call:
-            del self.busy[cam.id]
-        self._record(call, meta.get("bridge"), cam)
+            await session.stop()          # releases the camera it holds
+        for cid, holder in list(self.busy.items()):
+            if holder is call:
+                del self.busy[cid]
+        self._record(call, meta.get("bridge"), session.visited if session else None)
 
-    def _record(self, call: Call, bridge: Bridge | None, camera: Camera | None) -> None:
+    def _record(self, call: Call, bridge: Bridge | None, cameras: list[str] | None = None) -> None:
         info = call.info()
         dur = int(info["ended_at"] - info["answered_at"]) if info["answered_at"] and info["ended_at"] else 0
         self.store.add_history({
             "id": call.id, "direction": call.direction, "remote": call.remote_user,
             "remote_display": call.remote_display, "phone": call.account.cfg.username,
             "bridge": (bridge.name or bridge.id) if bridge else None,
-            "camera": camera.name if camera else None,
+            "camera": ", ".join(cameras) if cameras else None,
             "started_at": info["created_at"], "answered_at": info["answered_at"],
             "ended_at": info["ended_at"] or time.time(), "duration": dur,
             "codec": info["codec"], "result": call.end_reason or "rejected",
@@ -543,10 +717,16 @@ class Engine:
         for call in self.ua.calls.values():
             info = call.info()
             meta = self.call_meta.get(call.id, {})
-            info["bridge"] = meta["bridge"].name or meta["bridge"].id if meta.get("bridge") else None
-            info["camera"] = meta["camera"].name if meta.get("camera") else None
-            info["phone"] = call.account.cfg.username
             session = self.sessions.get(call.id)
+            info["bridge"] = meta["bridge"].name or meta["bridge"].id if meta.get("bridge") else None
+            info["bridge_id"] = meta["bridge"].id if meta.get("bridge") else None
+            if session and session.camera:
+                info["camera"] = session.camera.name
+            elif session and session.phase == "menu":
+                info["camera"] = "IVR menu"
+            else:
+                info["camera"] = None
+            info["phone"] = call.account.cfg.username
             if session:
                 info["media"] = session.info()
             calls.append(info)

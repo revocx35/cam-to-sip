@@ -44,6 +44,17 @@ Start with **Logs** in the web UI, or `docker logs -f cam2sip`. For SIP problems
    - **ONVIF** shows "no speaker": the camera/stream has no backchannel. Enable audio output in the camera, or try another stream path.
 3. During a call the call card shows *Camera speaker: connected / talking*. *talking* means audio is above the gate.
 
+## IVR menu
+
+| Symptom | Cause / fix |
+|---|---|
+| Menu is silent or just beeps | espeak-ng is missing (custom image): prompts fall back to beeps. The official image includes it. Check **Preview menu** in the bridge form |
+| Wrong language / accent | Set *Voice / language* (e.g. `tr`, `de`) **and** write the prompt texts in that language |
+| Key presses do nothing | The phone/PBX must send DTMF. FreePBX default *RFC 4733* works, as do SIP INFO and in-band tones. Check the logs for `DTMF` lines; if there are none, set the extension's DTMF mode to RFC 4733 |
+| "… is busy right now" | That camera is in another call (SIP or browser) |
+| Hangs up after the menu | No key pressed within *Repeat menu* × (menu length + *Wait after menu*) |
+| `*` doesn't return to the menu | Only in IVR bridges, and only when `*` is the *back-to-menu digit* (and not the hang-up digit) |
+
 ## Browser calls
 
 | Symptom | Cause / fix |

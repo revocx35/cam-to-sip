@@ -60,7 +60,7 @@ cam2sip/
   store.py           JSON persistence (/data/config.json, call_history.json), atomic writes, 0600
   engine.py          Engine (lifecycle, config -> go2rtc/SIP, call routing, camera tools)
                      CameraLink (camera side of any call: mic in, speaker out, gate, keep-alive)
-                     BridgeSession (SIP call <-> CameraLink: pacer, DTMF, watchdog)
+                     BridgeSession (SIP call <-> CameraLink: pacer, prompts, IVR menu, DTMF, watchdog)
   webcall.py         WebCall (browser call over a WebSocket <-> CameraLink)
   go2rtc.py          go2rtc API client + stream reconciliation + probe parsing
   onvif.py           minimal ONVIF SOAP client (device info, profiles, stream URIs)
@@ -75,6 +75,8 @@ cam2sip/
     g711.py          A-law/mu-law tables, translate+gain tables, level meter, tone, WAV
     rtp.py           RTP packets, port allocator, RtpEndpoint (socket), Pacer (jitter buffer)
     rtsp.py          RtspAudioClient (pull mic from go2rtc), TalkServer/TalkSession (serve speaker audio)
+    tts.py           espeak-ng text-to-speech -> 8 kHz prompts (resample, normalise, cache)
+    dtmf.py          Goertzel in-band DTMF detector (fallback when telephone-event isn't negotiated)
   web/
     app.py           FastAPI app: auth middleware, REST API, static UI
     auth.py          scrypt password hash, HMAC-signed session cookie
@@ -138,9 +140,29 @@ Rejections:
 | No common codec | `488 Not Acceptable Here` |
 | Caller hangs up while ringing (CANCEL) | `487 Request Terminated` |
 
+### Inbound with an IVR menu
+
+A bridge in `mode: "ivr"` has `ivr_options` (`digit → camera_id` + optional spoken label). No camera is reserved at INVITE time. After the call is answered, `BridgeSession` works through these phases:
+
+```mermaid
+stateDiagram-v2
+    [*] --> menu: answered
+    menu --> menu: invalid digit / camera busy (announce, repeat)
+    menu --> connected: valid digit → reserve camera, CameraLink.start(), "Connecting to {name}"
+    menu --> [*]: no choice after ivr_repeats → goodbye + BYE
+    connected --> menu: menu_digit (*) → CameraLink.stop(), release camera
+    connected --> [*]: BYE / hang-up digit / max duration
+```
+
+- **Prompts.** The spoken menu is `greeting + option_text per option`, synthesized by espeak-ng (22.05 kHz), low-passed, resampled to 8 kHz, peak-normalised and cached as PCM and per-codec G.711. Menus are pre-rendered on config apply.
+- **Priority on the 20 ms clock.** Prompt frames replace camera frames in `BridgeSession._to_phone()`. So "Connecting to …" plays while the new camera's RTSP/talk connections come up; the camera audio buffered meanwhile is trimmed by the Pacer.
+- **Barge-in.** In the menu phase any digit is queued and immediately stops the current prompt. A digit queued during an announcement skips the next menu replay.
+- **Digits.** They arrive via RFC 4733 (deduplicated by RTP timestamp), SIP INFO, or the Goertzel detector when no telephone-event was negotiated. While connected, the menu digit returns to the menu; other digits go to the hang-up digit / DTMF actions.
+- Several callers can be in the same bridge's menu at once, and each camera still allows only one call. The history records every camera visited ("Garage, Front door").
+
 ### Outbound: camera calls a phone (doorbell)
 
-`POST /api/bridges/{id}/call {"target": "600"}` leads to `Account.dial()`:
+`POST /api/bridges/{id}/call {"target": "600"}` leads to `Account.dial()` (IVR bridges take an optional `camera_id`, defaulting to the first menu camera):
 
 1. cam2sip sends an INVITE with an SDP offer (PCMA, PCMU, telephone-event/101).
 2. If the PBX answers `401`/`407`, cam2sip retries once with digest auth (CSeq+1, new branch).
@@ -306,4 +328,5 @@ camera video ──► go2rtc MSE ──► WebSocket proxy /api/cameras/{id}/vi
 - Tapo talk-back needs the TP-Link cloud password, and on newer firmware *Third-Party Compatibility* enabled.
 - Latency is roughly 150–300 ms end to end (camera chunking plus buffers). Fine for an intercom, not for music.
 - Browser calls need HTTPS for the microphone (self-signed on :8443 by default).
-- Ideas: SIP over TCP/TLS, G.722 wideband, video for SIP video phones, MQTT events, multiple cameras per phone (IVR digit selection), WebRTC for browser calls over high-latency links.
+- IVR prompts use espeak-ng, which is intelligible but robotic. Neural TTS (e.g. Piper) or uploaded recordings would sound better at the cost of image size.
+- Ideas: SIP over TCP/TLS, G.722 wideband, video for SIP video phones, MQTT events, recorded/uploaded IVR prompts, WebRTC for browser calls over high-latency links.

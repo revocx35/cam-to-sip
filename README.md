@@ -36,6 +36,7 @@ Runs as a small Docker Compose stack with a web UI for configuration.
   - **any go2rtc source** (`rtsp://`, `tapo://`, `dvrip://`, `exec:` backchannels, …).
 - **Bridges** link one camera to one phone, with auto-answer after N rings, mic/speaker gain, a noise gate, a caller whitelist and a max call duration.
 - **Outbound "doorbell" calls**: the camera calls an extension or ring group, from the UI or the REST API (Home Assistant, Frigate, Node-RED…).
+- **IVR camera menu**: one virtual phone can serve several cameras. Callers hear a spoken menu (*"Press 1 for Front door. Press 2 for Garage."*), press a digit, and can press `*` during the call to switch. Prompts are offline text-to-speech (espeak-ng) with 100+ languages.
 - **Browser calls**: click *Call* on a camera to get live video plus two-way audio in the browser, with push-to-talk (button or space bar) or hands-free open mic. No SIP phone needed.
 - **DTMF actions**: a keypad digit fires an HTTP webhook (e.g. *press 1 to open the gate*) and can hang up.
 - **Web UI**: dashboard with live call and media stats, camera snapshots, a *Listen* (mic) test, a *Test speaker* chime, ONVIF stream discovery, call history and live logs.
@@ -47,6 +48,7 @@ Runs as a small Docker Compose stack with a web UI for configuration.
 |---|---|
 | PBX | FreePBX 17 (Asterisk 22.10, chan_pjsip, UDP) |
 | Camera | TP-Link **Tapo C212**, firmware 1.5.1: mic via RTSP, speaker via `tapo://` |
+| IVR | English and Turkish prompts (espeak-ng 1.52), RFC 4733 DTMF, menu → camera → `*` → other camera |
 | Browsers | Firefox (full browser call, headless test), Chromium (audio path, headless). Uses standard AudioWorklet + MSE, as in Chrome, Edge and Safari |
 | go2rtc | 1.9.14 |
 | Host | Docker 29 / Compose v5 on Ubuntu (x86-64) |
@@ -152,6 +154,20 @@ go2rtc and the talk server listen on `127.0.0.1` only, so the stack can run next
 
 A camera can only be in one call at a time; a second caller gets `486 Busy Here`.
 
+### IVR: one phone, several cameras
+
+In **Bridges → New bridge**, set *When the phone is called* to **Play a menu to pick a camera (IVR)** and add the cameras with their digits:
+
+![IVR menu settings](docs/images/ivr-menu.png)
+
+- The caller hears the greeting plus one line per camera: *"Press {digit} for {name}."* The spoken name defaults to the camera name; you can set a friendlier one, e.g. "the garage".
+- Pressing a digit connects that camera and plays *"Connecting to {name}."* A key press also cuts any prompt short, so regular callers don't have to wait.
+- **During the call**, press `*` (the *back-to-menu digit*) to return to the menu and pick another camera.
+- Invalid choices and busy cameras are announced, then the menu repeats (3 times by default) before hanging up.
+- **Voice / language**: any espeak-ng voice, e.g. `en-us`, `en-gb`, `de`, `fr`, `tr`. Write the prompt texts in the same language, and use **Preview menu** to hear it in the browser.
+- DTMF works with RFC 4733 telephone-events (the FreePBX default), SIP INFO, and in-band tones as a fallback.
+- Doorbell calls from an IVR bridge (**Call…**/API) connect straight to one of its cameras (`camera_id` in the API).
+
 ### Browser calls
 
 Click **Call** on a camera card, or **Call from browser** on the dashboard. The call page shows the camera's live video and plays its microphone.
@@ -172,6 +188,7 @@ From the UI (**Bridges → Call…**) or from any automation with the API token 
 curl -X POST http://<server>:8090/api/bridges/<bridge-id>/call \
   -H "Authorization: Bearer <api-token>" \
   -H "Content-Type: application/json" -d '{"target": "600"}'    # extension or ring group
+# IVR bridges: add "camera_id": "<id>" to choose which of its cameras calls
 ```
 
 Home Assistant example (`configuration.yaml`):
@@ -213,6 +230,8 @@ docker build -t cam2sip-dev -f Dockerfile.dev .            # python + test deps
 docker run --rm -v $PWD:/app -w /app cam2sip-dev python -m pytest -q
 docker run --rm --network host -v $PWD:/app -w /app cam2sip-dev \
   python tools/sip_test_call.py --server <pbx> --user <ext> --password <secret> --target <bridged-ext>
+# IVR: press keys during the call, e.g. choose 2, back to the menu, choose 1
+  python tools/sip_test_call.py ... --dtmf 2,*,1 --dtmf-interval 5
 # browser call smoke test (Firefox + fake mic), see the script's docstring for the docker command
 python tools/browser_call_test.py --password <admin> --camera <camera-id>
 ```

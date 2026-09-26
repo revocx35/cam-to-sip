@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import struct
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -333,6 +334,21 @@ class Call:
             else:
                 self.rtp.set_remote(addr[0], addr[1])
         return True
+
+    async def send_dtmf(self, digit: str, duration_ms: int = 120) -> None:
+        """Send one key press as RFC 4733 telephone-events."""
+        if not self.rtp or not self.negotiated or self.negotiated.dtmf_pt is None:
+            raise RuntimeError("telephone-event was not negotiated")
+        event = "0123456789*#ABCD".index(digit.upper())
+        pt = self.negotiated.dtmf_pt
+        ts = self.rtp.sender.ts
+        steps = max(1, duration_ms // 20)
+        for i in range(1, steps + 1):
+            self.rtp.send_event(pt, struct.pack("!BBH", event, 10, i * 160), ts, marker=(i == 1))
+            await asyncio.sleep(0.02)
+        for _ in range(3):   # end packets are sent three times
+            self.rtp.send_event(pt, struct.pack("!BBH", event, 0x80 | 10, steps * 160), ts)
+        self.rtp.sender.ts = (ts + steps * 160) & 0xFFFFFFFF
 
     # -- UAS operations --------------------------------------------------------------------
     def _contact(self) -> str:

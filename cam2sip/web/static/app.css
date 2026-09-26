@@ -159,6 +159,11 @@ legend { font-weight: 700; font-size: 13px; padding: 0 6px; }
 .dtmf-row { display: grid; grid-template-columns: 60px 80px 1fr auto auto; gap: 6px; align-items: center; margin-bottom: 6px; }
 .dtmf-row input, .dtmf-row select { padding: 6px 8px; }
 
+.ivr-row { display: grid; grid-template-columns: 64px 1fr 1.2fr auto; gap: 6px; align-items: center; margin-bottom: 6px; }
+.ivr-row input, .ivr-row select { padding: 6px 8px; }
+details.more { margin: 0 0 12px; }
+details.more summary { cursor: pointer; font-weight: 600; font-size: 13px; color: var(--primary); margin-bottom: 10px; }
+
 /* tables */
 .table-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -227,4 +232,6 @@ tr:last-child td { border-bottom: 0; }
   form .row, form .row.three { grid-template-columns: 1fr; }
   .dtmf-row { grid-template-columns: 50px 70px 1fr; }
   .call-layout { grid-template-columns: minmax(0, 1fr); }
+  .ivr-row { grid-template-columns: 56px 1fr auto; }
+  .ivr-row input { grid-column: 1 / -1; grid-row: 2; }
 }

@@ -57,6 +57,11 @@ async def run(args: argparse.Namespace) -> int:
         codec, pt = call.codec, call.negotiated.remote_pt
         loop = asyncio.get_running_loop()
         await asyncio.sleep(args.listen_before)
+        for digit in [d for d in (args.dtmf or "").split(",") if d]:
+            mark = len(rx)
+            await call.send_dtmf(digit)
+            print(f"pressed {digit} (at {mark / 8000:.1f}s of received audio)")
+            await asyncio.sleep(args.dtmf_interval)
         frames = g711.tone(codec, args.tone_hz, args.tone_seconds, -8) + g711.silence(codec, 8000)
         t = loop.time()
         for i in range(0, len(frames), 160):
@@ -95,6 +100,8 @@ def main() -> None:
     p.add_argument("--listen-before", type=float, default=2.0, help="seconds of listening before the tone")
     p.add_argument("--tone-hz", type=float, default=700)
     p.add_argument("--tone-seconds", type=float, default=3.0)
+    p.add_argument("--dtmf", help="comma separated keys to press after --listen-before, e.g. 2,*,1 (IVR test)")
+    p.add_argument("--dtmf-interval", type=float, default=4.0, help="seconds between key presses")
     p.add_argument("--wav", help="save received audio to this WAV file")
     p.add_argument("-v", "--verbose", action="store_true", help="print SIP messages")
     args = p.parse_args()
