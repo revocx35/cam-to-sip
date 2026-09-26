@@ -469,7 +469,7 @@ class Engine:
         self.ua.on_incoming = self.on_incoming
         self.go2rtc = Go2rtc(settings.go2rtc_api, settings.go2rtc_rtsp)
         self.talk_server = TalkServer("127.0.0.1", settings.talk_port)
-        self.tts = tts.Tts()
+        self.tts = tts.Tts(data_dir=settings.data_dir, piper_port=settings.piper_port)
         self.sounds = SoundLibrary(store)
         self.busy: dict[str, Call] = {}                # camera id -> call
         self.sessions: dict[str, BridgeSession] = {}   # call id -> session
@@ -497,6 +497,7 @@ class Engine:
         await self.ua.stop()
         await self.talk_server.stop()
         await self.go2rtc.close()
+        await self.tts.close()
 
     async def apply_config(self) -> None:
         cfg = self.store.config
@@ -521,12 +522,34 @@ class Engine:
         await self.ua.set_accounts(accounts)
         asyncio.create_task(self._prewarm_prompts())
 
+    def used_voices(self) -> set[str]:
+        voices = {b.ivr_voice for b in self.store.config.bridges if b.mode == "ivr"}
+        voices |= {c.notify_voice for c in self.store.config.cameras if c.notify_enabled}
+        return voices
+
     async def _prewarm_prompts(self) -> None:
-        """Synthesize IVR menus and call notices ahead of time so callers don't wait for TTS."""
+        """Download missing natural voices and synthesize every prompt ahead of time."""
+        piper = self.tts.piper
+        if piper and piper.available:
+            for voice in self.used_voices():
+                key = tts.piper_key(voice)
+                if key and not piper.is_installed(key):
+                    try:
+                        await piper.download(key)
+                    except Exception as e:
+                        log.warning("could not download voice %s: %s", key, e)
         try:
             for b in self.store.config.bridges:
-                if b.mode == "ivr" and b.enabled:
-                    await self.menu_pcm(b)
+                if b.mode != "ivr" or not b.enabled:
+                    continue
+                await self.menu_pcm(b)
+                for text, sound in ((b.ivr_invalid_text, b.ivr_invalid_sound), (b.ivr_goodbye_text, b.ivr_goodbye_sound)):
+                    await self.prompt_pcm(text, sound, b.ivr_voice, b.ivr_speed)
+                for o in b.ivr_options:
+                    cam = self.store.camera(o.camera_id)
+                    name = o.label.strip() or (cam.name if cam else o.digit)
+                    for tpl, sound in ((b.ivr_busy_text, b.ivr_busy_sound), (b.ivr_connect_text, b.ivr_connect_sound)):
+                        await self.prompt_pcm(tts.fill(tpl, name=name), sound, b.ivr_voice, b.ivr_speed)
             for cam in self.store.config.cameras:
                 if cam.notify_enabled:
                     await self.prompt_pcm(cam.notify_text, cam.notify_sound, cam.notify_voice, cam.notify_speed)

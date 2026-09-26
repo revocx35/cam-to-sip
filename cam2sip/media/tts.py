@@ -17,6 +17,7 @@ import wave
 from collections import OrderedDict
 
 from . import g711
+from .piper import PiperEngine
 
 log = logging.getLogger("cam2sip.tts")
 
@@ -75,11 +76,22 @@ def _parse_wav(data: bytes) -> tuple[array.array, int]:
     return samples, rate
 
 
+PIPER_PREFIX = "piper:"
+
+
+def piper_key(voice: str) -> str | None:
+    return voice[len(PIPER_PREFIX):] if voice.startswith(PIPER_PREFIX) else None
+
+
 class Tts:
-    def __init__(self, binary: str | None = None):
+    """Prompt synthesis: Piper voices ("piper:<key>") or espeak-ng voices ("en-us")."""
+
+    def __init__(self, binary: str | None = None, data_dir: str | None = None, piper_port: int = 18556):
         self.binary = binary or shutil.which("espeak-ng") or shutil.which("espeak")
         self._cache: OrderedDict[tuple, array.array] = OrderedDict()
         self._encoded: OrderedDict[tuple, bytes] = OrderedDict()
+        self.piper = PiperEngine(data_dir, piper_port) if data_dir else None
+        self._espeak_ids: set[str] = set()
         if not self.binary:
             log.warning("espeak-ng not found - IVR prompts will be beeps")
 
@@ -95,11 +107,46 @@ class Tts:
         if hit is not None:
             self._cache.move_to_end(key)
             return hit
-        samples = await self._synth(text, voice, int(speed)) if text else array.array("h")
+        if not text:
+            return array.array("h")
+        pkey = piper_key(voice)
+        if pkey:
+            samples = await self._piper(text, pkey, int(speed))
+            if samples is None:            # fallback: don't cache, so the natural voice wins later
+                return await self._synth(text, await self._espeak_for(pkey), int(speed))
+        else:
+            samples = await self._synth(text, voice, int(speed))
         self._cache[key] = samples
         if len(self._cache) > CACHE_SIZE:
             self._cache.popitem(last=False)
         return samples
+
+    async def _piper(self, text: str, key: str, speed: int) -> array.array | None:
+        if not self.piper or not self.piper.available:
+            return None
+        try:
+            # our "words per minute" scale -> Piper phoneme length (1.0 is its natural pace)
+            samples, rate = await self.piper.synthesize(text, key, max(0.5, min(2.0, 165 / max(speed, 1))))
+        except Exception as e:
+            log.warning("Piper voice %s failed (%s) - using espeak-ng for now", key, e)
+            return None
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, lambda: _normalize(_resample_to_8k(samples, rate)))
+
+    async def _espeak_for(self, key: str) -> str:
+        """Closest espeak-ng voice for a Piper voice key like 'tr_TR-dfki-medium'."""
+        if not self._espeak_ids:
+            self._espeak_ids = {v["id"] for v in await self.voices()}
+        code = key.split("-")[0]                     # e.g. en_US
+        family, _, region = code.partition("_")
+        for candidate in (f"{family}-{region.lower()}", family):
+            if candidate in self._espeak_ids:
+                return candidate
+        return "en-us"
+
+    async def close(self) -> None:
+        if self.piper:
+            await self.piper.close()
 
     async def _synth(self, text: str, voice: str, speed: int) -> array.array:
         if not self.binary:

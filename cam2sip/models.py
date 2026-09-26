@@ -34,7 +34,7 @@ class Camera(BaseModel):
     notify_enabled: bool = False
     notify_text: str = "Attention please. A call has started on this camera."
     notify_sound: str = ""          # uploaded sound id; overrides notify_text
-    notify_voice: str = "en-us"
+    notify_voice: str = "piper:en_US-lessac-medium"
     notify_speed: int = Field(default=150, ge=80, le=300)
 
     @field_validator("name")
@@ -138,7 +138,7 @@ class Bridge(BaseModel):
     ivr_busy_text: str = "{name} is busy right now."
     ivr_connect_text: str = "Connecting to {name}."
     ivr_goodbye_text: str = "Goodbye."
-    ivr_voice: str = "en-us"        # espeak-ng voice, e.g. en-us, en-gb, tr, de
+    ivr_voice: str = "piper:en_US-lessac-medium"   # "piper:<voice>" (natural) or espeak-ng id (en-us, tr, ...)
     ivr_speed: int = Field(default=150, ge=80, le=300)   # words per minute
     ivr_timeout: float = Field(default=8.0, ge=2, le=60)  # wait after the menu before repeating
     ivr_repeats: int = Field(default=3, ge=1, le=10)

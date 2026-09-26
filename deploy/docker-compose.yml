@@ -26,7 +26,7 @@ services:
       - '{"api":{"listen":"127.0.0.1:11984"},"rtsp":{"listen":"127.0.0.1:18554"},"webrtc":{"listen":""},"srtp":{"listen":""},"log":{"level":"info"}}'
 
   cam2sip:
-    image: ghcr.io/revocx35/cam-to-sip:1.3   # 1.3.x updates; use :latest to follow main
+    image: ghcr.io/revocx35/cam-to-sip:1.4   # 1.4.x updates; use :latest to follow main
     container_name: cam2sip
     restart: unless-stopped
     network_mode: host

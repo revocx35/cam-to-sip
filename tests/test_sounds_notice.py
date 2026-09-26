@@ -124,7 +124,7 @@ async def test_menu_pcm_mixes_tts_and_sounds(tmp_path):
     snd = engine.sounds.add("greet", make_wav(0.5))
     cam = Camera(name="Garage", host="h")
     store.config.cameras.append(cam)
-    b = Bridge(phone_id="p", mode="ivr", ivr_greeting_sound=snd.id,
+    b = Bridge(phone_id="p", mode="ivr", ivr_greeting_sound=snd.id, ivr_voice="en-us",
                ivr_options=[{"digit": "1", "camera_id": cam.id}])
     pcm = await engine.menu_pcm(b)
     tts_only = await engine.tts.pcm("Press 1 for Garage.", b.ivr_voice, b.ivr_speed)

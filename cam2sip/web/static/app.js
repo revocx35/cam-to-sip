@@ -182,6 +182,92 @@ function bridgeState(b, st) {
   return badge('ready', 'ok');
 }
 
+/* ---------- text-to-speech voices ---------- */
+let voicesAt = 0;
+async function ensureVoices(force = false) {
+  if (!force && state.voices && Date.now() - voicesAt < 60000) return state.voices;
+  try { state.voices = await api('GET', '/tts/voices'); voicesAt = Date.now(); }
+  catch (e) { state.voices = state.voices || { piper: { available: false }, espeak: { voices: [] } }; }
+  return state.voices;
+}
+const QUALITY_RANK = { high: 0, medium: 1, low: 2, x_low: 3 };
+function voiceFamilies() {
+  const v = state.voices || { piper: {}, espeak: {} };
+  const fams = {};
+  const fam = id => (fams[id] ||= { id, label: '', natural: [], basic: [] });
+  const installed = new Set((v.piper.installed || []).map(x => x.key));
+  const seen = new Set();
+  for (const c of [...(v.piper.installed || []), ...(v.piper.catalog || [])]) {
+    if (seen.has(c.key)) continue;
+    seen.add(c.key);
+    const f = fam(c.family);
+    if (!f.label && c.language) f.label = c.native && c.native !== c.language ? `${c.language} (${c.native})` : c.language;
+    f.natural.push(Object.assign({}, c, { installed: installed.has(c.key) }));
+  }
+  for (const e of (v.espeak && v.espeak.voices) || []) {
+    const f = fam(e.id.split('-')[0]);
+    if (!f.label) f.label = e.name;
+    f.basic.push(e);
+  }
+  for (const f of Object.values(fams)) {
+    f.natural.sort((a, b) => (b.installed - a.installed) || ((QUALITY_RANK[a.quality] ?? 9) - (QUALITY_RANK[b.quality] ?? 9)) || a.key.localeCompare(b.key));
+  }
+  return fams;
+}
+const voiceFamilyOf = value => value.startsWith('piper:') ? value.slice(6).split('_')[0] : value.split('-')[0];
+function voiceOptions(f, value, naturalOnly) {
+  let html = '';
+  if (f && f.natural.length) {
+    html += '<optgroup label="Natural voices (Piper)">' + f.natural.map(c => {
+      const id = 'piper:' + c.key;
+      return `<option value="${esc(id)}" ${id === value ? 'selected' : ''}>${c.installed ? '✓' : '⬇'} ${esc(c.name)} · ${esc(c.country || c.code)} · ${esc(c.quality)}${c.installed ? '' : ` · ${c.size_mb} MB`}</option>`;
+    }).join('') + '</optgroup>';
+  }
+  if (f && !naturalOnly && f.basic.length) {
+    html += '<optgroup label="Basic voices (espeak-ng)">' + f.basic.map(e => `<option value="${esc(e.id)}" ${e.id === value ? 'selected' : ''}>${esc(e.name)}</option>`).join('') + '</optgroup>';
+  }
+  if (value && !html.includes(`value="${esc(value)}"`)) html = `<option value="${esc(value)}" selected>${esc(value)}</option>` + html;
+  return html;
+}
+function voicePicker(name, value, naturalOnly = false) {
+  const fams = voiceFamilies();
+  const list = Object.values(fams).filter(f => !naturalOnly || f.natural.length).sort((a, b) => (a.label || a.id).localeCompare(b.label || b.id));
+  const cur = value ? voiceFamilyOf(value) : (list.find(f => f.id === 'en') || list[0] || {}).id;
+  return `<div class="voice-picker" data-voice-picker ${naturalOnly ? 'data-natural-only' : ''}>
+      <select data-voice-lang aria-label="Language">${list.map(f => `<option value="${esc(f.id)}" ${f.id === cur ? 'selected' : ''}>${esc(f.label || f.id)}${f.natural.length ? ' ★' : ''}</option>`).join('')}</select>
+      <select ${name ? `name="${name}"` : ''} data-voice aria-label="Voice">${voiceOptions(fams[cur], value, naturalOnly)}</select>
+    </div><span class="hint" data-voice-hint></span>`;
+}
+function bindVoicePickers(root) {
+  $$('[data-voice-picker]', root).forEach(p => {
+    const lang = $('[data-voice-lang]', p), voice = $('[data-voice]', p), hint = p.nextElementSibling;
+    const naturalOnly = p.hasAttribute('data-natural-only');
+    const showHint = () => {
+      const v = voice.value || '';
+      const f = voiceFamilies()[voiceFamilyOf(v)];
+      const c = f && v.startsWith('piper:') ? f.natural.find(x => 'piper:' + x.key === v) : null;
+      if (!hint) return;
+      hint.textContent = c && !c.installed ? `Natural voice, downloads automatically (${c.size_mb} MB) when saved or previewed.`
+        : v.startsWith('piper:') ? 'Natural voice (Piper), runs offline.'
+        : v ? 'Basic voice (espeak-ng). Languages marked ★ have natural voices.' : '';
+    };
+    lang.onchange = () => {
+      const f = voiceFamilies()[lang.value];
+      const pick = f.natural.find(c => c.installed) || f.natural.find(c => c.quality === 'medium') || f.natural[0];
+      const val = pick ? 'piper:' + pick.key : (naturalOnly ? '' : (f.basic[0] || {}).id || '');
+      voice.innerHTML = voiceOptions(f, val, naturalOnly);
+      voice.value = val;
+      showHint();
+    };
+    voice.onchange = showHint;
+    showHint();
+  });
+}
+function voiceNeedsDownload(value) {
+  if (!value.startsWith('piper:')) return false;
+  return !((state.voices && state.voices.piper.installed) || []).some(x => 'piper:' + x.key === value);
+}
+
 /* ---------- router ---------- */
 let pollTimer = null;
 let pageCleanup = null;
@@ -364,7 +450,8 @@ async function cameraAction(btn, cam, card) {
   });
 }
 
-function cameraForm(cam) {
+async function cameraForm(cam) {
+  await ensureVoices();
   const c = cam || { kind: 'tapo', enabled: true, rtsp_port: 554, onvif_port: 2020, stream_path: 'stream2', mic_with_video: true };
   const secretPh = set => set ? 'unchanged (leave empty to keep)' : '';
   openModal(cam ? `Edit ${cam.name}` : 'Add camera', `
@@ -407,7 +494,7 @@ function cameraForm(cam) {
         <p class="hint muted small" style="margin:-4px 0 10px">Plays before any audio is shared. The camera microphone stays muted until it has finished, and the caller hears it too. Needs the camera speaker.</p>
         ${promptField('Announcement', 'notify_text', c.notify_text ?? 'Attention please. A call has started on this camera.', 'notify_sound', c.notify_sound || '')}
         <div class="row">
-          <label>Voice / language<input name="notify_voice" list="cam-voice-list" value="${esc(c.notify_voice || 'en-us')}"><datalist id="cam-voice-list"></datalist></label>
+          <label>Voice / language ${voicePicker('notify_voice', c.notify_voice || 'piper:en_US-lessac-medium')}</label>
           <label>Speed (words per minute)<input name="notify_speed" type="number" min="80" max="300" step="5" value="${esc(c.notify_speed || 150)}"></label>
         </div>
         <div class="toolbar" style="margin-bottom:12px">
@@ -439,9 +526,7 @@ function cameraForm(cam) {
     sync();
     const payload = () => Object.assign(readForm(form), cam ? { id: cam.id } : {});
     bindSoundSelects(form);
-    api('GET', '/ivr/voices').then(v => {
-      $('#cam-voice-list', form).innerHTML = v.voices.map(o => `<option value="${esc(o.id)}">${esc(o.name)}</option>`).join('');
-    }).catch(() => {});
+    bindVoicePickers(form);
     const noticeBody = () => {
       const f = readForm(form);
       return { notify_text: f.notify_text, notify_sound: form.notify_sound.value, notify_voice: f.notify_voice, notify_speed: f.notify_speed || 150 };
@@ -455,6 +540,7 @@ function cameraForm(cam) {
     });
     $('#notice-preview', form).onclick = e => busy(e.target, async () => {
       const n = noticeBody();
+      if (!n.notify_sound && voiceNeedsDownload(n.notify_voice)) toast('Downloading the natural voice first - this can take a minute…');
       const blob = await api('POST', '/ivr/preview', { text: n.notify_text, sound: n.notify_sound, ivr_voice: n.notify_voice, ivr_speed: n.notify_speed });
       const audio = $('#notice-audio', form);
       audio.src = URL.createObjectURL(blob);
@@ -659,11 +745,12 @@ const BRIDGE_DEFAULTS = {
   max_call_seconds: 600, allowed_callers: [], dtmf_actions: [], hangup_digit: '', ivr_options: [],
   ivr_greeting: 'Hello.', ivr_option_text: 'Press {digit} for {name}.', ivr_invalid_text: 'Sorry, that is not a valid choice.',
   ivr_busy_text: '{name} is busy right now.', ivr_connect_text: 'Connecting to {name}.', ivr_goodbye_text: 'Goodbye.',
-  ivr_voice: 'en-us', ivr_speed: 150, ivr_timeout: 8, ivr_repeats: 3, menu_digit: '*',
+  ivr_voice: 'piper:en_US-lessac-medium', ivr_speed: 150, ivr_timeout: 8, ivr_repeats: 3, menu_digit: '*',
   ivr_greeting_sound: '', ivr_invalid_sound: '', ivr_busy_sound: '', ivr_connect_sound: '', ivr_goodbye_sound: '',
 };
 
-function bridgeForm(b) {
+async function bridgeForm(b) {
+  await ensureVoices();
   const x = Object.assign({}, BRIDGE_DEFAULTS, b || {});
   x.ivr_options = (x.ivr_options || []).map(o => Object.assign({ sound: '' }, o));
   const usedPhones = new Set(state.bridges.filter(o => o.id !== b?.id).map(o => o.phone_id));
@@ -687,8 +774,7 @@ function bridgeForm(b) {
         <div id="ivr-list">${opts.map(ivrRow).join('')}</div>
         <button type="button" class="btn small" id="ivr-add" style="margin-bottom:12px">+ Add camera to menu</button>
         <div class="row">
-          <label>Voice / language <span class="hint" id="voice-hint">e.g. en-us, en-gb, tr, de, fr</span>
-            <input name="ivr_voice" list="voice-list" value="${esc(x.ivr_voice)}"><datalist id="voice-list"></datalist></label>
+          <label>Voice / language ${voicePicker('ivr_voice', x.ivr_voice)}</label>
           <label>Speed (words per minute)<input name="ivr_speed" type="number" min="80" max="300" step="5" value="${esc(x.ivr_speed)}"></label>
         </div>
         ${promptField('Greeting', 'ivr_greeting', x.ivr_greeting, 'ivr_greeting_sound', x.ivr_greeting_sound)}
@@ -757,12 +843,10 @@ function bridgeForm(b) {
       const snd = await uploadSound();
       if (snd) refreshSoundSelects(form);
     });
-    api('GET', '/ivr/voices').then(v => {
-      $('#voice-list', form).innerHTML = v.voices.map(o => `<option value="${esc(o.id)}">${esc(o.name)}</option>`).join('');
-      if (!v.available) $('#voice-hint', form).textContent = 'text-to-speech unavailable: beeps are played';
-    }).catch(() => {});
+    bindVoicePickers(form);
     $('#ivr-preview', form).onclick = e => busy(e.target, async () => {
       const f = readForm(form);
+      if (voiceNeedsDownload(f.ivr_voice)) toast('Downloading the natural voice first - this can take a minute…');
       const blob = await api('POST', '/ivr/preview', {
         ivr_options: ivrOptions(), ivr_greeting: f.ivr_greeting, ivr_greeting_sound: form.ivr_greeting_sound.value,
         ivr_option_text: f.ivr_option_text, ivr_voice: f.ivr_voice, ivr_speed: f.ivr_speed || 150,
@@ -985,6 +1069,7 @@ pages.call = async id => {
 /* ---------- settings ---------- */
 pages.settings = async () => {
   const s = await api('GET', '/settings');
+  await ensureVoices(true);
   const origin = location.origin;
   main().innerHTML = `
     <div class="page-head"><div><h1>Settings</h1></div></div>
@@ -1006,6 +1091,16 @@ pages.settings = async () => {
           <div class="form-actions"><button class="btn primary" type="submit">Change password</button></div>
         </form></div>
     </div>
+    <div class="card section"><h2>Voices</h2>
+      <p class="muted" style="margin-top:4px">Natural voices (Piper) sound much more human than the basic espeak-ng voices. Each one is downloaded once (usually 20-120 MB) and then runs offline on this server. Languages marked ★ have natural voices.</p>
+      <div id="voice-installed"></div>
+      <div class="voice-add">
+        <label style="flex:1;min-width:280px;margin:0">Add a natural voice ${voicePicker('', 'piper:en_US-lessac-medium', true)}</label>
+        <button class="btn primary small" id="voice-download">⬇ Download</button>
+      </div>
+      <label style="margin-top:12px">Test sentence<input id="voice-sample" value="Hello! Press 1 for the front door, or 2 for the garage."></label>
+      <audio id="voice-audio" controls class="hidden" style="height:32px;width:100%"></audio>
+    </div>
     <div class="card section"><div class="card-row"><h2>Sounds</h2><button class="btn small" id="sound-upload">⬆ Upload sound…</button></div>
       <p class="muted" style="margin-top:4px">Uploaded audio for IVR prompts and camera call notices. Any format your browser can play (MP3, WAV, OGG, M4A…); converted to 8 kHz telephone audio, max 120 s.</p>
       <div id="sound-list"></div>
@@ -1021,6 +1116,46 @@ pages.settings = async () => {
   -H "Content-Type: application/json" -d '{"target": "1001"}'</pre>
       <p class="muted small">Bridge ids: ${state.bridges.length ? state.bridges.map(b => `<code>${esc(b.id)}</code> (${esc(b.name || '')})`).join(', ') : 'create a bridge first'}.</p>
     </div>`;
+  let voiceTimer = null;
+  const drawVoices = () => {
+    const pv = state.voices.piper || {};
+    const box = $('#voice-installed');
+    if (!pv.available) { box.innerHTML = '<p class="muted">Natural voices are not available in this installation (Piper is missing).</p>'; return; }
+    const rows = (pv.installed || []).map(v => `<tr data-voice-key="${esc(v.key)}"><td>${esc(v.name)} · ${esc(v.country || v.code)} · ${esc(v.quality)}</td>
+        <td>${esc(v.language)}</td><td>${v.size_mb} MB</td><td class="small">${v.used_by.length ? esc(v.used_by.join(', ')) : '<span class="muted">unused</span>'}</td>
+        <td><button class="btn small" data-vact="test">▶ Test</button> <button class="btn small danger" data-vact="delete">Delete</button></td></tr>`);
+    const dl = Object.entries(pv.downloads || {}).map(([k, d]) => `<tr><td>${esc(k)}</td><td colspan="3">${d.error ? `<span class="error">${esc(d.error)}</span>`
+        : `<div class="meter"><span>${Math.round(d.progress * 100)}%</span><div class="bar"><i style="width:${Math.round(d.progress * 100)}%"></i></div></div>`}</td><td>${d.error ? '' : 'downloading…'}</td></tr>`);
+    box.innerHTML = rows.length || dl.length ? `<div class="table-wrap"><table><tr><th>Installed voice</th><th>Language</th><th>Size</th><th>Used by</th><th></th></tr>${rows.join('')}${dl.join('')}</table></div>`
+      : '<p class="muted">No natural voices installed yet. Pick one below; voices selected in a bridge or camera also download automatically.</p>';
+    if (pv.catalog_error) box.insertAdjacentHTML('beforeend', `<p class="error small">${esc(pv.catalog_error)}</p>`);
+    $$('[data-vact]', box).forEach(btn => btn.onclick = () => {
+      const key = btn.closest('tr').dataset.voiceKey;
+      if (btn.dataset.vact === 'test') return testVoice(btn, 'piper:' + key);
+      if (confirm(`Delete voice ${key}?`)) busy(btn, async () => { await api('DELETE', `/tts/voices/${encodeURIComponent(key)}`); await refreshVoices(); toast('Voice deleted'); });
+    });
+    const downloading = Object.values(pv.downloads || {}).some(d => !d.error);
+    if (downloading && !voiceTimer) voiceTimer = setInterval(refreshVoices, 1000);
+    if (!downloading && voiceTimer) { clearInterval(voiceTimer); voiceTimer = null; }
+  };
+  const refreshVoices = async () => { await ensureVoices(true); drawVoices(); };
+  const testVoice = (btn, voice) => busy(btn, async () => {
+    const blob = await api('POST', '/ivr/preview', { text: $('#voice-sample').value, ivr_voice: voice, ivr_speed: 150 });
+    const audio = $('#voice-audio');
+    audio.src = URL.createObjectURL(blob);
+    audio.classList.remove('hidden');
+    audio.play().catch(() => {});
+  });
+  bindVoicePickers(main());
+  drawVoices();
+  $('#voice-download').onclick = e => busy(e.target, async () => {
+    const v = $('.voice-add [data-voice]').value;
+    if (!v.startsWith('piper:')) return;
+    await api('POST', `/tts/voices/${encodeURIComponent(v.slice(6))}`);
+    await refreshVoices();
+    toast('Download started', 'ok');
+  });
+  pageCleanup = () => { if (voiceTimer) clearInterval(voiceTimer); };
   const drawSounds = () => {
     $('#sound-list').innerHTML = state.sounds.length ? `<div class="table-wrap"><table>
       <tr><th>Name</th><th>Length</th><th>Used by</th><th>Listen</th><th></th></tr>

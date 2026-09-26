@@ -31,6 +31,7 @@ class Settings:
     rtp_port_min: int = field(default_factory=lambda: _int("RTP_PORT_MIN", 16000))
     rtp_port_max: int = field(default_factory=lambda: _int("RTP_PORT_MAX", 16199))
     talk_port: int = field(default_factory=lambda: _int("TALK_PORT", 18555))
+    piper_port: int = field(default_factory=lambda: _int("PIPER_PORT", 18556))
     go2rtc_api: str = field(default_factory=lambda: _env("GO2RTC_API", "http://127.0.0.1:11984"))
     go2rtc_rtsp: str = field(default_factory=lambda: _env("GO2RTC_RTSP", "rtsp://127.0.0.1:18554"))
     admin_password: str = field(default_factory=lambda: _env("ADMIN_PASSWORD", ""))

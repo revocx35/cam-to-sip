@@ -77,7 +77,7 @@ async def test_ivr_call_switches_cameras(tmp_path):
     cam_a = Camera(name="Front door", host="10.0.0.1")
     cam_b = Camera(name="Garage", host="10.0.0.2")
     phone = Phone(name="Intercom", server="127.0.0.1", port=9, username="1008", password="x")
-    bridge = Bridge(phone_id=phone.id, mode="ivr", ivr_greeting="Hi.",
+    bridge = Bridge(phone_id=phone.id, mode="ivr", ivr_greeting="Hi.", ivr_voice="en-us",
                     ivr_options=[{"digit": "1", "camera_id": cam_a.id}, {"digit": "2", "camera_id": cam_b.id}])
     store.config.cameras += [cam_a, cam_b]
     store.config.phones.append(phone)

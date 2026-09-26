@@ -182,6 +182,17 @@ In a camera's settings, enable **Call notice**:
 - The announcement is typed text (spoken by text-to-speech in the chosen voice/language) or an uploaded sound. **Preview** plays it in your browser; **Play on camera** plays it on the camera speaker.
 - It needs the camera's speaker (for a Tapo, the TP-Link cloud password). Without a working speaker the notice is skipped after 10 s and a warning is logged.
 
+### Natural voices (text-to-speech)
+
+Prompts and call notices can use **natural neural voices** ([Piper](https://github.com/OHF-Voice/piper1-gpl), offline, CPU) instead of the robotic espeak-ng voices.
+
+![Voices](docs/images/voices.png)
+
+- Pick a language (★ = natural voices available, about 40 languages including Turkish) and then a voice, in the IVR and call notice settings.
+- A voice downloads automatically (about 20–120 MB, from Hugging Face) the first time it's used, saved or previewed. After that it runs offline. Manage voices in **Settings → Voices** (download with progress, test, delete; voices in use are protected).
+- New bridges and cameras default to `en_US-lessac-medium`. Existing ones keep their espeak voice until you pick a natural one.
+- Piper (GPL-3.0) runs as a separate local process on `127.0.0.1:18556` (`PIPER_PORT`). Expect about 150–200 MB of RAM per loaded voice and about 0.2 s per prompt. If a natural voice is unavailable (e.g. offline), prompts fall back to the matching espeak-ng voice.
+
 ### Uploaded sounds
 
 Use your own recordings instead of text-to-speech. Upload them from **Settings → Sounds**, from the IVR section of a bridge, or from a camera's call notice section.

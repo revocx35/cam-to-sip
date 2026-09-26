@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
 from .. import onvif
+from ..media import piper as piper_mod
 from ..media import tts as tts_mod
 from ..engine import CameraBusy, Engine
 from ..logbuffer import LogBuffer
@@ -463,6 +464,56 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             pcm = await engine.menu_pcm(body)
         return Response(to_wav(pcm), media_type="audio/wav", headers={"Cache-Control": "no-store"})
+
+    # -- text-to-speech voices ---------------------------------------------------------------
+    def voice_users(voice: str) -> list[str]:
+        users = [f"camera '{c.name}'" for c in cfg.cameras if c.notify_voice == voice]
+        users += [f"bridge '{b.name or b.id}'" for b in cfg.bridges if b.ivr_voice == voice]
+        return users
+
+    @app.get("/api/tts/voices")
+    async def tts_voices():
+        """Natural (Piper) voices - installed, downloading and the catalog - plus espeak-ng voices."""
+        t = engine.tts
+        piper = t.piper
+        out = {"espeak": {"available": t.available, "voices": await t.voices()},
+               "piper": {"available": bool(piper and piper.available)}}
+        if piper and piper.available:
+            installed = piper.installed()
+            for v in installed:
+                v["used_by"] = voice_users(tts_mod.PIPER_PREFIX + v["key"])
+            try:
+                catalog = [piper_mod.simplify(k, v) for k, v in (await piper.catalog()).items()]
+            except Exception:
+                catalog = []
+            out["piper"].update(installed=installed, downloads=piper.downloads,
+                                catalog=catalog, catalog_error=piper.catalog_error)
+        return out
+
+    @app.post("/api/tts/voices/{key}")
+    async def download_voice(key: str):
+        piper = engine.tts.piper
+        if not piper or not piper.available:
+            raise HTTPException(409, "Piper is not available in this installation")
+        try:
+            known = key in await piper.catalog()
+        except Exception as e:
+            raise HTTPException(502, str(e)) from e
+        if not known:
+            raise HTTPException(404, "unknown voice")
+        piper.start_download(key)
+        return {"ok": True, "installed": piper.is_installed(key)}
+
+    @app.delete("/api/tts/voices/{key}")
+    async def delete_voice(key: str):
+        piper = engine.tts.piper
+        if not piper or not piper.is_installed(key):
+            raise HTTPException(404, "not installed")
+        users = voice_users(tts_mod.PIPER_PREFIX + key)
+        if users:
+            raise HTTPException(409, f"voice is used by {', '.join(users)}")
+        piper.delete(key)
+        return {"ok": True}
 
     # -- sounds ---------------------------------------------------------------------------------
     def sound_users(sid: str) -> list[str]:
