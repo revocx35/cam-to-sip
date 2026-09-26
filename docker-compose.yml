@@ -2,7 +2,7 @@
 #
 #   cp .env.example .env      # optional: adjust ports / admin password
 #   docker compose up -d --build
-#   open http://<server-ip>:8090
+#   open http://<server-ip>:8090   (or https://<server-ip>:8443 for browser calls with microphone)
 #
 # Both containers use host networking: SIP and RTP need real, reachable
 # addresses (no Docker NAT), and go2rtc is only reachable on 127.0.0.1.
@@ -33,6 +33,9 @@ services:
       - go2rtc
     environment:
       CAM2SIP_WEB_PORT: ${WEB_PORT:-8090}
+      CAM2SIP_HTTPS_PORT: ${HTTPS_PORT:-8443}
+      CAM2SIP_TLS_CERT: ${TLS_CERT:-}
+      CAM2SIP_TLS_KEY: ${TLS_KEY:-}
       CAM2SIP_SIP_PORT: ${SIP_PORT:-5062}
       CAM2SIP_RTP_PORT_MIN: ${RTP_PORT_MIN:-16000}
       CAM2SIP_RTP_PORT_MAX: ${RTP_PORT_MAX:-16199}

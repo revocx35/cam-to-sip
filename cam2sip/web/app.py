@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hmac
+import json
 import logging
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request, Response
+import uvicorn
+import websockets
+from fastapi import FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
@@ -21,6 +25,7 @@ from ..models import SECRET_FIELDS, Bridge, Camera, Phone, redact
 from ..settings import Settings
 from ..store import Store
 from . import auth
+from .tls import ensure_certificate
 
 log = logging.getLogger("cam2sip.web")
 STATIC = Path(__file__).parent / "static"
@@ -48,6 +53,14 @@ class DiscoverBody(BaseModel):
     id: str | None = None
 
 
+class _QuietWebSocketLogs(logging.Filter):
+    """Drop uvicorn's per-WebSocket 'connection open/closed/accepted' lines."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        return msg not in ("connection open", "connection closed") and ' - "WebSocket ' not in msg
+
+
 def setup_logging(settings: Settings, buffer: LogBuffer) -> None:
     root = logging.getLogger()
     root.setLevel(logging.INFO)
@@ -61,6 +74,7 @@ def setup_logging(settings: Settings, buffer: LogBuffer) -> None:
     logging.getLogger("cam2sip").setLevel(settings.log_level)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    logging.getLogger("uvicorn.error").addFilter(_QuietWebSocketLogs())
     if settings.sip_trace:
         logging.getLogger("cam2sip.sip.trace").setLevel(logging.DEBUG)
 
@@ -82,8 +96,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         log.info("cam2sip %s starting (web :%d, sip udp :%d, rtp %d-%d)", settings.version,
                  settings.web_port, settings.sip_port, settings.rtp_port_min, settings.rtp_port_max)
         await engine.start()
+        https = await start_https(_app)
         yield
+        if https:
+            https[0].should_exit = True
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(https[1], 5)
         await engine.stop()
+
+    async def start_https(asgi_app):
+        """Second listener with TLS (same app), so browsers allow the microphone."""
+        if not settings.https_port:
+            return None
+        pair = ensure_certificate(settings.data_dir, settings.tls_cert, settings.tls_key)
+        if not pair:
+            return None
+        config = uvicorn.Config(asgi_app, host=settings.web_host, port=settings.https_port,
+                                ssl_certfile=pair[0], ssl_keyfile=pair[1], lifespan="off",
+                                log_config=None, access_log=False, proxy_headers=True,
+                                forwarded_allow_ips="*", timeout_graceful_shutdown=3)
+        server = _NoSignalServer(config)
+        task = asyncio.create_task(server.serve())
+        for _ in range(50):
+            if server.started or task.done():
+                break
+            await asyncio.sleep(0.05)
+        if task.done():
+            log.warning("HTTPS listener on :%d failed to start", settings.https_port)
+            return None
+        log.info("HTTPS (self-signed unless CAM2SIP_TLS_CERT is set) on port %d", settings.https_port)
+        return server, task
 
     app = FastAPI(title="cam2sip", version=settings.version, lifespan=lifespan,
                   docs_url="/api/docs", redoc_url=None, openapi_url="/api/openapi.json")
@@ -121,7 +163,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def session(request: Request):
         return {"authenticated": authed(request),
                 "setup_required": not store.config.settings.admin_password_hash,
-                "version": settings.version}
+                "version": settings.version, "https_port": settings.https_port}
 
     @app.post("/api/setup")
     async def setup(body: PasswordBody, response: Response):
@@ -405,6 +447,78 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         store.save()
         return {"api_token": cfg.settings.api_token}
 
+    # -- browser calls (WebSockets) ---------------------------------------------------------------
+    def ws_authed(ws: WebSocket) -> bool:
+        # the HTTP middleware doesn't run for WebSockets; the SameSite=strict session
+        # cookie is not sent on cross-site WebSocket handshakes
+        s = store.config.settings
+        return auth.check_session(ws.cookies.get(auth.COOKIE), s.session_secret, s.admin_password_hash)
+
+    async def ws_reject(ws: WebSocket, message: str, code: int) -> None:
+        await ws.send_text(json.dumps({"type": "error", "message": message}))
+        await ws.close(code=code)
+
+    @app.websocket("/api/cameras/{cid}/talk")
+    async def ws_talk(ws: WebSocket, cid: str):
+        await ws.accept()
+        if not ws_authed(ws):
+            return await ws_reject(ws, "not authenticated", 4401)
+        cam = store.camera(cid)
+        if not cam or not cam.enabled:
+            return await ws_reject(ws, "camera not found or disabled", 4404)
+        client = ws.client.host if ws.client else "?"
+        try:
+            await engine.run_web_call(cam, ws, client)
+        except CameraBusy as e:
+            await ws_reject(ws, str(e), 4409)
+
+    @app.websocket("/api/cameras/{cid}/video")
+    async def ws_video(ws: WebSocket, cid: str):
+        """Proxy go2rtc's MSE (fMP4 over WebSocket) for one camera stream only."""
+        await ws.accept()
+        if not ws_authed(ws):
+            return await ws_reject(ws, "not authenticated", 4401)
+        cam = store.camera(cid)
+        if not cam or not cam.enabled:
+            return await ws_reject(ws, "camera not found or disabled", 4404)
+        url = settings.go2rtc_api.replace("http://", "ws://", 1).rstrip("/") + f"/api/ws?src={cam.stream_name}"
+        try:
+            upstream = await websockets.connect(url, max_size=None, open_timeout=5, ping_interval=None)
+        except Exception as e:
+            return await ws_reject(ws, f"go2rtc unavailable: {e}", 4502)
+
+        async def down():
+            async for m in upstream:
+                if isinstance(m, bytes):
+                    await ws.send_bytes(m)
+                else:
+                    await ws.send_text(m)
+
+        async def up():
+            while True:
+                msg = await ws.receive()
+                if msg["type"] == "websocket.disconnect":
+                    return
+                text = msg.get("text")
+                if not text:
+                    continue
+                try:
+                    kind = json.loads(text).get("type")
+                except (ValueError, AttributeError):
+                    continue
+                if kind == "mse":   # only the MSE request is forwarded to go2rtc
+                    await upstream.send(text)
+
+        tasks = [asyncio.create_task(down()), asyncio.create_task(up())]
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for t in tasks:
+                t.cancel()
+            await upstream.close()
+            with contextlib.suppress(Exception):
+                await ws.close()
+
     # -- UI -------------------------------------------------------------------------------------
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
@@ -413,3 +527,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
 
     return app
+
+
+class _NoSignalServer(uvicorn.Server):
+    """uvicorn server that leaves signal handling to the main server."""
+
+    @contextlib.contextmanager
+    def capture_signals(self):
+        yield

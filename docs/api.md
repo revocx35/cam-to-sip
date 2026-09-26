@@ -7,7 +7,7 @@ Base URL: `http://<server>:8090/api`. Interactive OpenAPI docs are at `/api/docs
 - **Browser**: `POST /api/login {"password": "…"}` sets an HTTP-only session cookie (7 days).
 - **Automations**: send `Authorization: Bearer <api-token>`. The token is under **Settings → Automation API** and can be regenerated there.
 
-Public endpoints: `GET /api/health`, `GET /api/session`, `POST /api/login`, `POST /api/logout`, `POST /api/setup` (first run only).
+Public endpoints: `GET /api/health`, `GET /api/session` (also returns `https_port`), `POST /api/login`, `POST /api/logout`, `POST /api/setup` (first run only).
 
 Secret fields (`password`, `cloud_password`) are never returned. Responses contain `""` plus a `<field>_set: true/false` flag. When updating, omit the field or send `""` to keep the stored value.
 
@@ -109,6 +109,17 @@ Camera object:
   ]
 }
 ```
+
+### Browser calls (WebSockets)
+
+These are used by the web UI's call page. They authenticate with the session cookie (bearer tokens can't be sent by browsers on WebSockets), and they're served on both the HTTP and the HTTPS port.
+
+| Path | Direction | Frames |
+|---|---|---|
+| `WS /cameras/{id}/talk` | both | **binary**: G.711 A-law, 8 kHz mono. Server → browser is camera mic audio; browser → server is audio for the camera speaker (20 ms frames). **text** (server → browser): `{"type":"status","mic":{...},"speaker":{...},"duration":12}` every second, `{"type":"error","message":...}`, `{"type":"ended","reason":...}`. **text** (browser → server): `{"type":"gate","db":-55}` (open-mic noise gate; `null` = send everything, for push-to-talk), `{"type":"hangup"}` |
+| `WS /cameras/{id}/video` | both | go2rtc's MSE protocol for this camera only. Send `{"type":"mse","value":"avc1.640029,..."}`; you receive `{"type":"mse","value":"video/mp4; codecs=..."}` followed by binary fMP4 segments |
+
+A talk connection gets `{"type":"error","message":"… is already in a call"}` when the camera is busy (SIP or another browser). Active browser calls show up in `/status` and `/calls` with `"direction": "web"`, and `POST /calls/{id}/hangup` ends them.
 
 ### Settings
 

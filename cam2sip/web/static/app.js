@@ -98,17 +98,21 @@ const phoneById = id => state.phones.find(p => p.id === id);
 
 /* ---------- router ---------- */
 let pollTimer = null;
+let pageCleanup = null;
 function every(ms, fn) { clearInterval(pollTimer); pollTimer = setInterval(() => { if (!document.hidden) fn(); }, ms); }
 const pages = {};
 
 async function route() {
   clearInterval(pollTimer);
-  const name = location.hash.replace(/^#\/?/, '').split('/')[0] || 'dashboard';
-  const page = pages[name] ? name : 'dashboard';
-  $$('#nav a').forEach(a => a.classList.toggle('active', a.dataset.page === page));
-  try { await pages[page](); }
+  if (pageCleanup) { const c = pageCleanup; pageCleanup = null; c(); }
+  const [name, arg] = location.hash.replace(/^#\/?/, '').split('/');
+  const page = pages[name || 'dashboard'] ? (name || 'dashboard') : 'dashboard';
+  const navPage = page === 'call' ? 'cameras' : page;
+  $$('#nav a').forEach(a => a.classList.toggle('active', a.dataset.page === navPage));
+  try { await pages[page](arg ? decodeURIComponent(arg) : undefined); }
   catch (e) { main().innerHTML = `<div class="empty"><p>${esc(e.message)}</p></div>`; }
 }
+window.addEventListener('beforeunload', () => { if (pageCleanup) pageCleanup(); });
 window.addEventListener('hashchange', route);
 
 /* ---------- dashboard ---------- */
@@ -119,13 +123,13 @@ function callCard(c) {
   const stateBadge = c.state === 'active' ? badge(`in call ${dur}`, 'ok') : badge(c.state, 'warn');
   return `<div class="card">
     <div class="card-row"><h2>${esc(c.remote_display || c.remote || 'unknown')}</h2>${stateBadge}</div>
-    <div class="muted">${c.direction === 'inbound' ? 'Calling' : 'Called by'} ${esc(c.phone)} &middot; bridge ${esc(c.bridge || '-')}</div>
+    <div class="muted">${c.direction === 'web' ? 'Browser call' : `${c.direction === 'inbound' ? 'Calling' : 'Called by'} ${esc(c.phone)} &middot; bridge ${esc(c.bridge || '-')}`}</div>
     <dl class="kv">
       <dt>Camera</dt><dd>${esc(c.camera || '-')}</dd>
       <dt>Codec</dt><dd>${esc(c.codec || '-')}</dd>
       <dt>Camera mic</dt><dd>${mic.connected ? badge(`live ${mic.codec || ''} · buffer ${mic.buffer_ms}ms`, 'ok') : badge(mic.error || 'connecting', mic.error ? 'bad' : 'warn')}</dd>
       <dt>Camera speaker</dt><dd>${spk.state === 'connected' ? badge(spk.gate_open ? 'talking' : 'connected', spk.gate_open ? 'info' : 'ok') : badge(spk.state || 'n/a', spk.state === 'error' ? 'bad' : '')}</dd>
-      <dt>RTP</dt><dd class="mono">${c.rtp.rx_packets} in / ${c.rtp.tx_packets} out ${c.rtp.remote ? '· ' + esc(c.rtp.remote) : ''}</dd>
+      <dt>${c.direction === 'web' ? 'Frames' : 'RTP'}</dt><dd class="mono">${c.rtp.rx_packets} in / ${c.rtp.tx_packets} out ${c.rtp.remote ? '· ' + esc(c.rtp.remote) : ''}</dd>
     </dl>
     <div class="card-actions"><button class="btn danger" data-hangup="${esc(c.id)}">Hang up</button></div>
   </div>`;
@@ -162,6 +166,17 @@ pages.dashboard = async () => {
       <div class="section"><h2>Active calls</h2>
         ${st.calls.length ? `<div class="grid">${st.calls.map(callCard).join('')}</div>` : '<div class="empty"><p>No active calls.</p></div>'}
       </div>
+      ${state.cameras.length ? `<div class="section"><h2>Cameras</h2><div class="table-wrap"><table>
+        <tr><th>Camera</th><th>Microphone</th><th>Speaker</th><th>Status</th><th></th></tr>
+        ${state.cameras.map(c => {
+          const p = c.probe || {};
+          const busy = st.busy_cameras.includes(c.id);
+          return `<tr><td>${esc(c.name)}</td><td>${p.mic ? badge(p.mic, 'ok') : badge('?', '')}</td>
+            <td>${p.speaker ? badge(p.speaker, 'ok') : badge(c.probe ? 'none' : '?', c.probe ? 'warn' : '')}</td>
+            <td>${!c.enabled ? badge('disabled') : busy ? badge('in call', 'info') : badge('ready', 'ok')}</td>
+            <td><a class="btn small primary" href="#/call/${esc(c.id)}" ${busy || !c.enabled ? 'aria-disabled="true" style="pointer-events:none;opacity:.5"' : ''}>Call from browser</a></td></tr>`;
+        }).join('')}
+      </table></div></div>` : ''}
       ${state.bridges.length ? `<div class="section"><h2>Bridges</h2><div class="table-wrap"><table>
         <tr><th>Bridge</th><th>Camera</th><th>Phone</th><th>Registration</th><th>Status</th><th></th></tr>
         ${state.bridges.map(b => {
@@ -214,6 +229,7 @@ pages.cameras = async () => {
         <div class="badges">${camCaps(c)}</div>
         <div class="audio-slot"></div>
         <div class="card-actions">
+          <button class="btn small primary" data-act="call" ${c.busy || !c.enabled ? 'disabled' : ''}>Call</button>
           <button class="btn small" data-act="probe">Check</button>
           <button class="btn small" data-act="listen">Listen 4s</button>
           <button class="btn small" data-act="speaker">Test speaker</button>
@@ -237,6 +253,7 @@ pages.cameras = async () => {
 
 async function cameraAction(btn, cam, card) {
   const act = btn.dataset.act;
+  if (act === 'call') { location.hash = `#/call/${encodeURIComponent(cam.id)}`; return; }
   if (act === 'edit') return cameraForm(cam);
   if (act === 'delete') {
     if (!confirm(`Delete camera "${cam.name}"?`)) return;
@@ -588,7 +605,7 @@ pages.calls = async () => {
       <div class="section"><h2>History</h2>
         ${data.history.length ? `<div class="table-wrap"><table>
           <tr><th>Time</th><th>Direction</th><th>Remote</th><th>Phone</th><th>Camera</th><th>Duration</th><th>Codec</th><th>Result</th></tr>
-          ${data.history.map(h => `<tr><td>${esc(fmtTime(h.started_at))}</td><td>${h.direction === 'inbound' ? '↓ in' : '↑ out'}</td>
+          ${data.history.map(h => `<tr><td>${esc(fmtTime(h.started_at))}</td><td>${h.direction === 'web' ? 'web' : h.direction === 'inbound' ? '↓ in' : '↑ out'}</td>
             <td>${esc(h.remote_display ? `${h.remote_display} (${h.remote})` : h.remote)}</td><td>${esc(h.phone)}</td><td>${esc(h.camera || '-')}</td>
             <td>${h.answered_at ? fmtDur(h.duration) : '-'}</td><td>${esc(h.codec || '-')}</td><td>${esc(h.result)}</td></tr>`).join('')}
         </table></div>` : '<div class="empty"><p>No calls yet.</p></div>'}</div>`;
@@ -631,6 +648,114 @@ pages.logs = async () => {
   $('#log-clear').onclick = () => { records = []; draw(); };
   await poll();
   every(1500, poll);
+};
+
+/* ---------- browser call ---------- */
+pages.call = async id => {
+  state.cameras = await api('GET', '/cameras');
+  const cam = camById(id);
+  if (!cam) { main().innerHTML = '<div class="empty"><p>Camera not found.</p></div>'; return; }
+  const secureUrl = `https://${location.hostname}:${state.httpsPort}${location.pathname}${location.hash}`;
+  main().innerHTML = `
+    <div class="page-head"><div><h1>${esc(cam.name)}</h1><p class="muted" id="call-sub">Connecting…</p></div>
+      <div class="toolbar"><span class="badge plain" id="call-timer">0:00</span>
+        <button class="btn danger solid" id="call-hangup">Hang up</button></div></div>
+    <div class="call-layout">
+      <div class="call-video">
+        <video id="call-video" autoplay muted playsinline></video>
+        <img id="call-img" class="hidden" alt="">
+        <div class="call-overlay" id="call-overlay">Connecting to camera…</div>
+      </div>
+      <div class="card call-side">
+        <div class="callout warn hidden" id="mic-warning"></div>
+        <button class="ptt" id="ptt" disabled><span class="ptt-label">Hold to talk</span><small>or hold the space bar</small></button>
+        <label class="check"><input type="checkbox" id="open-mic" disabled> Open microphone (hands-free)</label>
+        <div class="meter"><span>Camera</span><div class="bar"><i id="lvl-cam"></i></div></div>
+        <div class="meter"><span>You</span><div class="bar"><i id="lvl-mic"></i></div></div>
+        <label>Camera volume<input type="range" id="vol-cam" min="0" max="300" value="100"></label>
+        <label>Your voice on the camera<input type="range" id="vol-mic" min="25" max="400" value="100"></label>
+        <dl class="kv" id="call-stats"></dl>
+        <p class="muted small">Many cameras mute their microphone while their speaker plays, so push-to-talk works best.
+          Use headphones to avoid echo in hands-free mode.</p>
+      </div>
+    </div>`;
+  const overlay = $('#call-overlay'), sub = $('#call-sub'), ptt = $('#ptt'), openMic = $('#open-mic');
+  let started = Date.now();
+  const call = new CameraCall(cam.id, {
+    onState: (st, detail) => {
+      if (st === 'connected') { sub.textContent = 'Connected'; started = Date.now(); }
+      if (st === 'error' || st === 'ended') {
+        sub.textContent = detail ? `Call ended: ${detail}` : 'Call ended';
+        overlay.textContent = detail || 'Call ended';
+        overlay.classList.remove('hidden');
+        ptt.disabled = openMic.disabled = true;
+        $('#call-hangup').textContent = 'Back';
+      }
+    },
+    onStatus: m => {
+      const mic = m.mic || {}, spk = m.speaker || {};
+      $('#call-stats').innerHTML = `
+        <dt>Camera mic</dt><dd>${mic.connected ? badge(`live ${mic.codec || ''}`, 'ok') : badge(mic.error || 'connecting', mic.error ? 'bad' : 'warn')}</dd>
+        <dt>Camera speaker</dt><dd>${spk.state === 'connected' ? badge(spk.gate_open ? 'talking' : 'connected', spk.gate_open ? 'info' : 'ok') : badge(spk.state === 'none' ? 'not available' : spk.state, spk.state === 'error' ? 'bad' : '')}</dd>`;
+      if (spk.state === 'none') { ptt.disabled = openMic.disabled = true; ptt.querySelector('.ptt-label').textContent = 'No speaker'; }
+    },
+    onVideo: kind => { if (kind === 'live') overlay.classList.add('hidden'); },
+  });
+  $('#call-video').addEventListener('playing', () => overlay.classList.add('hidden'));
+  $('#call-img').addEventListener('load', () => overlay.classList.add('hidden'));
+  const timer = setInterval(() => { $('#call-timer').textContent = fmtDur((Date.now() - started) / 1000); }, 1000);
+  const meters = setInterval(() => {
+    $('#lvl-cam').style.width = `${Math.min(100, call.levels.camera * 400)}%`;
+    $('#lvl-mic').style.width = `${Math.min(100, call.levels.mic * 400)}%`;
+  }, 100);
+
+  const unlockAudio = () => { if (call.suspended) call.resume(); if (!overlay.querySelector('#enable-audio')) return; overlay.classList.add('hidden'); };
+  const setTalk = on => {
+    if (ptt.disabled || call.talking === on) return;
+    unlockAudio();
+    call.setTalking(on);
+    ptt.classList.toggle('active', on);
+    ptt.querySelector('.ptt-label').textContent = on ? 'Talking…' : 'Hold to talk';
+  };
+  ptt.addEventListener('pointerdown', e => { e.preventDefault(); ptt.setPointerCapture(e.pointerId); setTalk(true); });
+  ['pointerup', 'pointercancel', 'lostpointercapture'].forEach(ev => ptt.addEventListener(ev, () => setTalk(false)));
+  const onKey = e => {
+    if (e.code !== 'Space' || e.target.closest('input, textarea, select')) return;
+    e.preventDefault();
+    if (!e.repeat) setTalk(e.type === 'keydown');
+  };
+  document.addEventListener('keydown', onKey);
+  document.addEventListener('keyup', onKey);
+  openMic.onchange = () => { unlockAudio(); call.setOpenMic(openMic.checked); ptt.classList.toggle('open', openMic.checked); };
+  $('#vol-cam').oninput = e => call.setVolume(e.target.value / 100);
+  $('#vol-mic').oninput = e => { call.micGain = e.target.value / 100; };
+  $('#call-hangup').onclick = () => { location.hash = '#/cameras'; };
+
+  pageCleanup = () => {
+    clearInterval(timer); clearInterval(meters);
+    document.removeEventListener('keydown', onKey);
+    document.removeEventListener('keyup', onKey);
+    call.stop();
+  };
+
+  const mic = await call.start($('#call-video'), $('#call-img'));
+  const warn = $('#mic-warning');
+  if (mic === 'ready') { ptt.disabled = openMic.disabled = false; }
+  else if (mic === 'insecure') {
+    warn.innerHTML = state.httpsPort
+      ? `Browsers only allow the microphone on secure pages, so you can listen here but not talk.
+         <a href="${esc(secureUrl)}">Open this call over HTTPS</a> and accept the self-signed certificate once.`
+      : 'Browsers only allow the microphone on secure (HTTPS) pages. Serve the UI over HTTPS to talk; listening works here.';
+    warn.classList.remove('hidden');
+  } else {
+    warn.textContent = `Microphone unavailable (${call.micError || mic}). Allow microphone access for this site to talk.`;
+    warn.classList.remove('hidden');
+  }
+  if (call.suspended) {
+    overlay.innerHTML = '<button class="btn primary" id="enable-audio">Tap to start audio</button>';
+    overlay.classList.remove('hidden');
+    $('#enable-audio').onclick = async () => { await call.resume(); overlay.classList.add('hidden'); };
+  }
 };
 
 /* ---------- settings ---------- */
@@ -713,6 +838,7 @@ $('#logout').onclick = async () => { await api('POST', '/logout'); showAuth(fals
 
 async function start() {
   const s = await api('GET', '/session');
+  state.httpsPort = s.https_port;
   $('#version').textContent = `v${s.version}`;
   if (!s.authenticated) return showAuth(s.setup_required);
   $('#auth').classList.add('hidden');

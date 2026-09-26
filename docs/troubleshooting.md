@@ -44,6 +44,20 @@ Start with **Logs** in the web UI, or `docker logs -f cam2sip`. For SIP problems
    - **ONVIF** shows "no speaker": the camera/stream has no backchannel. Enable audio output in the camera, or try another stream path.
 3. During a call the call card shows *Camera speaker: connected / talking*. *talking* means audio is above the gate.
 
+## Browser calls
+
+| Symptom | Cause / fix |
+|---|---|
+| "Browsers only allow the microphone on secure pages" | You opened the UI over `http://<ip>`. Use `https://<ip>:8443` (accept the self-signed certificate) or your HTTPS reverse proxy. `http://localhost` also counts as secure |
+| Certificate warning on :8443 | Expected with the self-signed certificate: accept it once. For a trusted certificate, mount your own and set `TLS_CERT` / `TLS_KEY` |
+| "Microphone unavailable (NotAllowedError)" | The browser blocked mic access for the site: allow it in the address-bar permissions |
+| "Tap to start audio" | The browser blocked autoplay: tap it (or press the talk button) once |
+| Call page connects, then "… is already in a call" | The camera is in a SIP call or another browser call |
+| Video stays on "Connecting…" or shows slow snapshots | The browser lacks MSE/H.264 (it falls back to 1 fps snapshots), or the camera's mic stream has no video. Check *Request video together with audio* and the snapshot on the Cameras page |
+| No audio / video through a reverse proxy | Enable WebSocket support on the proxy (Nginx Proxy Manager: *Websockets Support*; nginx: `proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";`) |
+| Echo or feedback | Use push-to-talk or headphones. Lower "Your voice on the camera" |
+| The camera doesn't hear you in open-mic mode | Your voice is below the noise gate (-55 dBFS): speak up, raise "Your voice on the camera", or use push-to-talk (not gated) |
+
 ## go2rtc
 
 - Dashboard tile **go2rtc offline**: `docker logs cam2sip-go2rtc`. Check nothing else uses `127.0.0.1:11984` / `18554` (change `GO2RTC_API_PORT` / `GO2RTC_RTSP_PORT`).

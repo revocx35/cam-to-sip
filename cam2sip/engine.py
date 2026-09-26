@@ -17,6 +17,7 @@ from .models import Bridge, Camera
 from .settings import Settings
 from .sip.ua import AccountConfig, Call, UserAgent
 from .store import Store
+from .webcall import WebCall
 
 log = logging.getLogger("cam2sip.engine")
 
@@ -33,8 +34,115 @@ def mic_query(camera: Camera) -> str:
     return ("video&" if camera.mic_with_video else "") + "audio=pcma,pcmu"
 
 
+class CameraLink:
+    """Camera side of any call: microphone in, speaker out (both through go2rtc).
+
+    Used by SIP calls (BridgeSession) and browser calls (WebCall). The owner
+    gets microphone audio through `on_mic(codec, payload)` and feeds far-end
+    audio with `speak()`.
+    """
+
+    def __init__(self, engine: "Engine", camera: Camera, on_mic):
+        self.engine = engine
+        self.camera = camera
+        self.on_mic = on_mic
+        self.mic: RtspAudioClient | None = None
+        self.talk = None
+        self.talk_state = "none"
+        self.tasks: list[asyncio.Task] = []
+        self._gate_open_until = 0.0
+        self._last_talk_push = 0.0
+
+    def start(self) -> None:
+        cam = self.camera
+        url = self.engine.go2rtc.rtsp_url(cam.stream_name, mic_query(cam))
+        self.mic = RtspAudioClient(url, self.on_mic)
+        self.tasks.append(asyncio.create_task(self.mic.run()))
+        if cam.talk_source():
+            self.talk = self.engine.talk_server.create()
+            self.tasks.append(asyncio.create_task(self._talk_loop()))
+            self.tasks.append(asyncio.create_task(self._keepalive()))
+
+    async def stop(self) -> None:
+        for t in self.tasks:
+            t.cancel()
+        self.tasks = []
+        if self.talk:
+            self.talk.close()
+            await self.engine.go2rtc.stop_play(self.camera.talk_stream_name)
+
+    @property
+    def speaking(self) -> bool:
+        return time.monotonic() < self._gate_open_until
+
+    def speak(self, payload: bytes, codec: str, gain_db: float = 0.0, gate_db: float | None = None) -> None:
+        """Send one far-end audio frame towards the camera speaker (noise-gated)."""
+        talk = self.talk
+        if not talk or not talk.codec:
+            return
+        now = time.monotonic()
+        if gate_db is None or g711.level_dbfs(payload, codec) >= gate_db:
+            self._gate_open_until = now + 0.6   # hangover keeps word endings
+        if now < self._gate_open_until:
+            self._push(g711.convert(payload, codec, talk.codec, gain_db), now)
+
+    def _push(self, payload: bytes, now: float) -> None:
+        gap = now - self._last_talk_push if self._last_talk_push else 0.0
+        if gap > 0.1:
+            self.talk.advance(int(gap * 8000) - len(payload))
+        self.talk.push(payload)
+        self._last_talk_push = now
+
+    async def _keepalive(self) -> None:
+        # go2rtc drops an RTSP source after 5 s without data: while nobody talks,
+        # send one silent frame per second (inaudible, doesn't trigger the camera's AEC)
+        while True:
+            await asyncio.sleep(0.5)
+            talk = self.talk
+            now = time.monotonic()
+            if talk and talk.codec and talk.connected.is_set() and now - self._last_talk_push > 1.0:
+                self._push(g711.silence(talk.codec, 160), now)
+
+    async def _talk_loop(self) -> None:
+        """Ask go2rtc to pull our talk stream into the camera; re-attach if it drops."""
+        go2rtc = self.engine.go2rtc
+        dst = self.camera.talk_stream_name
+        attempt = 0
+        while True:
+            if not self.talk.connected.is_set():
+                attempt += 1
+                self.talk_state = "connecting"
+                try:
+                    await go2rtc.play(dst, self.talk.url)
+                    await asyncio.wait_for(self.talk.connected.wait(), 10)
+                    self.talk_state = "connected"
+                    attempt = 0
+                    log.info("[%s] speaker connected (%s)", self.camera.name, self.talk.codec)
+                except Exception as e:
+                    self.talk_state = "error"
+                    log.warning("[%s] speaker connect failed: %s", self.camera.name, e or "timeout")
+                    await asyncio.sleep(min(2 * attempt, 10))
+                    continue
+            await asyncio.sleep(1)
+
+    def info(self) -> dict:
+        return {
+            "mic": {
+                "connected": bool(self.mic and self.mic.connected.is_set()),
+                "codec": self.mic.codec if self.mic else None,
+                "error": self.mic.error if self.mic else None,
+            },
+            "speaker": {
+                "state": self.talk_state if self.talk else "none",
+                "codec": self.talk.codec if self.talk else None,
+                "packets": self.talk.tx_packets if self.talk else 0,
+                "gate_open": self.speaking,
+            },
+        }
+
+
 class BridgeSession:
-    """Media plumbing for one call: camera mic -> phone, phone -> camera speaker."""
+    """Media plumbing for one SIP call: camera mic -> phone, phone -> camera speaker."""
 
     def __init__(self, engine: "Engine", bridge: Bridge, camera: Camera, call: Call):
         self.engine = engine
@@ -42,12 +150,8 @@ class BridgeSession:
         self.camera = camera
         self.call = call
         self.pacer: Pacer | None = None
-        self.mic: RtspAudioClient | None = None
-        self.talk = None
-        self.talk_state = "none"
+        self.link = CameraLink(engine, camera, self._on_mic)
         self.tasks: list[asyncio.Task] = []
-        self._gate_open_until = 0.0
-        self._last_talk_push = 0.0
         self._last_dtmf_ts: int | None = None
         self.started = time.time()
 
@@ -56,19 +160,12 @@ class BridgeSession:
         return self.call.codec or "PCMA"
 
     async def start(self) -> None:
-        call, cam = self.call, self.camera
-        # camera microphone -> phone
+        call = self.call
         self.pacer = Pacer(self._to_phone, g711.SILENCE.get(self.phone_codec, 0xD5))
-        url = self.engine.go2rtc.rtsp_url(cam.stream_name, mic_query(cam))
-        self.mic = RtspAudioClient(url, self._on_mic)
-        self.tasks.append(asyncio.create_task(self.mic.run()))
         self.pacer.start()
-        # phone -> camera speaker
+        self.link.start()
         if call.rtp:
             call.rtp.on_packet = self._on_phone_rtp
-        if cam.talk_source():
-            self.talk = self.engine.talk_server.create()
-            self.tasks.append(asyncio.create_task(self._talk_loop()))
         self.tasks.append(asyncio.create_task(self._watchdog()))
         call.on_dtmf = self._on_dtmf
 
@@ -77,9 +174,7 @@ class BridgeSession:
             t.cancel()
         if self.pacer:
             self.pacer.stop()
-        if self.talk:
-            self.talk.close()
-            await self.engine.go2rtc.stop_play(self.camera.talk_stream_name)
+        await self.link.stop()
 
     # -- camera -> phone -------------------------------------------------------------
     def _on_mic(self, codec: str, payload: bytes) -> None:
@@ -100,47 +195,9 @@ class BridgeSession:
         if neg.dtmf_pt is not None and pkt.pt == neg.dtmf_pt:
             self._rtp_dtmf(pkt)
             return
-        if pkt.pt != neg.remote_pt or not self.talk or not self.talk.codec:
-            return
-        now = time.monotonic()
-        gate = self.bridge.speaker_gate_db
-        if gate is None or g711.level_dbfs(pkt.payload, self.phone_codec) >= gate:
-            self._gate_open_until = now + 0.6   # hangover keeps word endings
-        if now < self._gate_open_until:
-            self._push_talk(g711.convert(pkt.payload, self.phone_codec, self.talk.codec,
-                                         self.bridge.speaker_gain_db), now)
-        elif now - self._last_talk_push > 1.0:
-            # keep go2rtc's 5 s read timeout happy without feeding the speaker
-            self._push_talk(g711.silence(self.talk.codec, 160), now)
-
-    def _push_talk(self, payload: bytes, now: float) -> None:
-        gap = now - self._last_talk_push if self._last_talk_push else 0.0
-        if gap > 0.1:
-            self.talk.advance(int(gap * 8000) - len(payload))
-        self.talk.push(payload)
-        self._last_talk_push = now
-
-    async def _talk_loop(self) -> None:
-        """Ask go2rtc to pull our talk stream into the camera; re-attach if it drops."""
-        go2rtc = self.engine.go2rtc
-        dst = self.camera.talk_stream_name
-        attempt = 0
-        while self.call.state != "ended":
-            if not self.talk.connected.is_set():
-                attempt += 1
-                self.talk_state = "connecting"
-                try:
-                    await go2rtc.play(dst, self.talk.url)
-                    await asyncio.wait_for(self.talk.connected.wait(), 10)
-                    self.talk_state = "connected"
-                    attempt = 0
-                    log.info("[%s] speaker connected (%s)", self.camera.name, self.talk.codec)
-                except Exception as e:
-                    self.talk_state = "error"
-                    log.warning("[%s] speaker connect failed: %s", self.camera.name, e or "timeout")
-                    await asyncio.sleep(min(2 * attempt, 10))
-                    continue
-            await asyncio.sleep(1)
+        if pkt.pt == neg.remote_pt:
+            self.link.speak(pkt.payload, self.phone_codec, self.bridge.speaker_gain_db,
+                            self.bridge.speaker_gate_db)
 
     # -- dtmf / watchdog ----------------------------------------------------------------------
     def _rtp_dtmf(self, pkt: RtpPacket) -> None:
@@ -187,21 +244,10 @@ class BridgeSession:
                 return
 
     def info(self) -> dict:
-        return {
-            "mic": {
-                "connected": bool(self.mic and self.mic.connected.is_set()),
-                "codec": self.mic.codec if self.mic else None,
-                "error": self.mic.error if self.mic else None,
-                "underruns": self.pacer.underruns if self.pacer else 0,
-                "buffer_ms": int(len(self.pacer.buf) / 8) if self.pacer else 0,
-            },
-            "speaker": {
-                "state": self.talk_state,
-                "codec": self.talk.codec if self.talk else None,
-                "packets": self.talk.tx_packets if self.talk else 0,
-                "gate_open": time.monotonic() < self._gate_open_until,
-            },
-        }
+        info = self.link.info()
+        info["mic"]["underruns"] = self.pacer.underruns if self.pacer else 0
+        info["mic"]["buffer_ms"] = int(len(self.pacer.buf) / 8) if self.pacer else 0
+        return info
 
 
 class Engine:
@@ -218,6 +264,7 @@ class Engine:
         self.sessions: dict[str, BridgeSession] = {}   # call id -> session
         self.call_meta: dict[str, dict] = {}           # call id -> bridge/camera/phone ids
         self.probes: dict[str, dict] = {}              # camera id -> last probe result
+        self.web_calls: dict[str, WebCall] = {}        # web call id -> browser call
         self.started = time.time()
         self._tasks: list[asyncio.Task] = []
 
@@ -234,6 +281,8 @@ class Engine:
     async def stop(self) -> None:
         for t in self._tasks:
             t.cancel()
+        for wc in list(self.web_calls.values()):
+            await wc.hangup("server shutting down")
         await self.ua.stop()
         await self.talk_server.stop()
         await self.go2rtc.close()
@@ -360,7 +409,35 @@ class Engine:
             "codec": info["codec"], "result": call.end_reason or "rejected",
         })
 
+    # -- browser calls ------------------------------------------------------------------------
+    async def run_web_call(self, camera: Camera, ws, client: str) -> None:
+        """Serve a browser call to `camera` on an accepted WebSocket."""
+        if camera.id in self.busy:
+            raise CameraBusy(f"{camera.name} is already in a call")
+        call = WebCall(self, camera, ws, client)
+        self.busy[camera.id] = call
+        self.web_calls[call.id] = call
+        try:
+            await call.run()
+        finally:
+            self.web_calls.pop(call.id, None)
+            if self.busy.get(camera.id) is call:
+                del self.busy[camera.id]
+            info = call.info()
+            self.store.add_history({
+                "id": call.id, "direction": "web", "remote": client, "remote_display": "Web UI",
+                "phone": "-", "bridge": None, "camera": camera.name,
+                "started_at": call.started_at, "answered_at": call.started_at,
+                "ended_at": call.ended_at or time.time(),
+                "duration": int((call.ended_at or time.time()) - call.started_at),
+                "codec": info["codec"], "result": call.end_reason,
+            })
+
     async def hangup(self, call_id: str) -> bool:
+        wc = self.web_calls.get(call_id)
+        if wc:
+            await wc.hangup("hung up from web UI")
+            return True
         for call in list(self.ua.calls.values()):
             if call.id == call_id:
                 await call.hangup("hung up from web UI")
@@ -472,6 +549,12 @@ class Engine:
             session = self.sessions.get(call.id)
             if session:
                 info["media"] = session.info()
+            calls.append(info)
+        for wc in self.web_calls.values():
+            info = wc.info()
+            info["camera"] = wc.camera.name
+            info["bridge"] = None
+            info["phone"] = "browser"
             calls.append(info)
         return {
             "version": self.settings.version,

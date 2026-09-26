@@ -4,7 +4,7 @@ Guide for AI assistants (and humans) working on this repository.
 
 ## What this is
 
-**cam2sip** bridges IP-camera two-way audio to SIP. It registers "virtual phones" (SIP accounts) on a PBX. When one is called, it auto-answers and connects the caller to a camera: camera mic → caller, caller → camera speaker. It can also dial out ("doorbell"). The deliverable is a Docker Compose stack of two containers, `cam2sip` (Python) and `go2rtc` (camera protocols), with a web UI on :8090.
+**cam2sip** bridges IP-camera two-way audio to SIP. It registers "virtual phones" (SIP accounts) on a PBX. When one is called, it auto-answers and connects the caller to a camera: camera mic → caller, caller → camera speaker. It can also dial out ("doorbell"), and the web UI can call a camera straight from the browser (WebSocket audio + MSE video, `webcall.py` / `static/call.js`). The deliverable is a Docker Compose stack of two containers, `cam2sip` (Python) and `go2rtc` (camera protocols), with a web UI on :8090.
 
 Read [ARCHITECTURE.md](ARCHITECTURE.md) before changing call or media code. It has the component diagram, the call flows and the media pipeline.
 
@@ -24,6 +24,9 @@ docker run --rm -v $PWD:/app -w /app cam2sip-dev python -m pytest -q          # 
 docker run --rm --network host -v $PWD:/app -w /app cam2sip-dev \
   python tools/sip_test_call.py --server <pbx> --user <ext> --password <secret> --target <bridged-ext>
 
+# browser call smoke test (Firefox + fake mic + PulseAudio; full docker command in the docstring)
+python tools/browser_call_test.py --password <admin> --camera <camera-id>
+
 # inspect go2rtc (bound to localhost only)
 curl -s http://127.0.0.1:11984/api/streams | python3 -m json.tool
 ```
@@ -34,7 +37,8 @@ Local test-environment details (PBX, camera, credentials, where it's deployed) l
 
 - `cam2sip/sip/`: own SIP stack. `message.py` parses/builds, `auth.py` does digest, `sdp.py` handles SDP, `stack.py` has UDP + transactions, `ua.py` has accounts + calls.
 - `cam2sip/media/`: `g711.py` (tables), `rtp.py` (RTP socket, `Pacer` jitter buffer), `rtsp.py` (mic client + talk server for go2rtc).
-- `cam2sip/engine.py`: `Engine` (config → go2rtc streams + SIP accounts, call routing) and `BridgeSession` (per-call media).
+- `cam2sip/engine.py`: `Engine` (config → go2rtc streams + SIP accounts, call routing), `CameraLink` (camera side of any call: mic, speaker, gate, keep-alive) and `BridgeSession` (SIP call ↔ CameraLink).
+- `cam2sip/webcall.py`: `WebCall` (browser call over `WS /api/cameras/{id}/talk` ↔ CameraLink). The video WS proxy lives in `web/app.py`.
 - `cam2sip/web/`: FastAPI app plus a no-build vanilla-JS SPA in `static/`.
 - `cam2sip/models.py` / `store.py`: pydantic config persisted to `/data/config.json`.
 - `tests/`: pytest (asyncio mode auto). `tests/test_sip_loopback.py` runs real SIP calls between two in-process UAs.
@@ -63,6 +67,10 @@ Local test-environment details (PBX, camera, credentials, where it's deployed) l
 - `POST /api/streams?dst=<talk stream>&src=<url>` makes go2rtc pull `src` into the backchannel of `dst`. Our `TalkServer` is that `src`. An empty `src` stops playback.
 - Asterisk (FreePBX 17) picks PCMU for extensions even though we offer PCMA first. That's harmless: A↔μ conversion is a table lookup.
 - Asterisk routes a call from extension X to X itself to X's registered contact, so `tools/sip_test_call.py` can use the bridged extension's own credentials as the caller.
+- Browsers only give `getUserMedia` and AudioWorklets to secure contexts. That's why a second uvicorn listener serves TLS on :8443 (`web/tls.py` makes a self-signed certificate with the `openssl` CLI, which is present in `python:3.13-slim`). That listener runs with `lifespan="off"` and a no-op `capture_signals`; two servers capturing signals break shutdown.
+- FastAPI's `@app.middleware("http")` does **not** run for WebSockets. WS endpoints must check the session cookie themselves (`ws_authed`).
+- Headless browser testing: Playwright's Chromium has **no H.264** (MSE unsupported, so the page shows snapshots), and in a container its `audioWorklet.addModule()` never resolves (so `call.js` falls back to a ScriptProcessor after 4 s). Headless Firefox's AudioContext stays `suspended` without an audio device. Run PulseAudio with a null sink in the container, then Firefox exercises the full path (worklet + MSE).
+- The keep-alive for go2rtc's talk source is timer-driven (`CameraLink._keepalive`), because browsers send nothing while push-to-talk is released.
 - Client-transaction lingering uses `loop.call_later`, not sleeping tasks. Sleeping tasks made every test take 32 s and slowed shutdown.
 
 ## Release

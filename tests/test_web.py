@@ -1,4 +1,7 @@
 import json
+import socket
+import ssl
+import urllib.request
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,6 +15,7 @@ from .conftest import free_port
 @pytest.fixture()
 def client(tmp_path):
     s = Settings(data_dir=str(tmp_path), sip_port=free_port(), talk_port=free_port(),
+                 https_port=free_port(socket.SOCK_STREAM),
                  go2rtc_api="http://127.0.0.1:9", rtp_port_min=31000, rtp_port_max=31019)
     app = create_app(s)
     with TestClient(app) as c:
@@ -59,6 +63,16 @@ def test_setup_login_and_crud(client):
     assert client.post("/api/login", json={"password": "secret1"}).status_code == 200
     assert client.delete(f"/api/bridges/{bridge['id']}").status_code == 200
     assert client.delete(f"/api/cameras/{cam['id']}").status_code == 200
+
+
+def test_https_listener_with_self_signed_cert(client):
+    port = client.get("/api/session").json()["https_port"]
+    assert (client.data_dir / "tls" / "cert.pem").exists()
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    body = json.load(urllib.request.urlopen(f"https://127.0.0.1:{port}/api/health", context=ctx, timeout=5))
+    assert body["ok"] is True
 
 
 def test_camera_sources():

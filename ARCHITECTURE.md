@@ -5,7 +5,7 @@ cam2sip joins two worlds:
 - **Telephony**: SIP signalling plus RTP audio (G.711) with a PBX such as FreePBX/Asterisk.
 - **Cameras**: RTSP streams, ONVIF backchannels and vendor protocols such as Tapo's talk-back.
 
-The camera side is delegated to **go2rtc**, which already speaks every camera dialect. cam2sip's own process implements a small SIP user agent, the audio bridge and the web UI.
+The camera side is delegated to **go2rtc**, which already speaks every camera dialect. cam2sip's own process implements a small SIP user agent, the audio bridge and the web UI. The web UI can also **call a camera from the browser** over WebSockets (section 7a).
 
 ## 1. Runtime components
 
@@ -20,7 +20,7 @@ flowchart LR
         engine["Engine + BridgeSession<br/>engine.py"]
         rtsp_c["RtspAudioClient<br/>media/rtsp.py"]
         talk["TalkServer :18555<br/>media/rtsp.py"]
-        web["FastAPI + SPA :8090<br/>web/*"]
+        web["FastAPI + SPA :8090 / :8443<br/>web/* + webcall.py"]
       end
       subgraph g2r["go2rtc container"]
         api["HTTP API :11984"]
@@ -34,12 +34,12 @@ flowchart LR
     g2r -- "RTSP pull (speaker audio)" --> talk
     engine -- "streams / play / probe / snapshot" --> api
     g2r -- "RTSP / tapo:// / ONVIF backchannel" --> cam["IP camera"]
-    browser["Browser"] -- "HTTP" --> web
+    browser["Browser"] -- "HTTP(S) + WebSockets<br/>(UI, call audio, MSE video)" --> web
 ```
 
 | Container | Image | Listens on | Role |
 |---|---|---|---|
-| `cam2sip` | built from this repo | `0.0.0.0:8090/tcp` (UI/API), `0.0.0.0:5062/udp` (SIP), `16000-16199/udp` (RTP), `127.0.0.1:18555/tcp` (talk RTSP) | SIP UA, bridge engine, web UI |
+| `cam2sip` | built from this repo | `0.0.0.0:8090/tcp` (UI/API), `0.0.0.0:8443/tcp` (same over TLS), `0.0.0.0:5062/udp` (SIP), `16000-16199/udp` (RTP), `127.0.0.1:18555/tcp` (talk RTSP) | SIP UA, bridge engine, web UI, browser calls |
 | `cam2sip-go2rtc` | `alexxit/go2rtc:1.9.14` | `127.0.0.1:11984` (API), `127.0.0.1:18554` (RTSP) | camera protocols, backchannel, snapshots, transcoding |
 
 Both containers use **host networking**:
@@ -59,7 +59,9 @@ cam2sip/
   models.py          pydantic models: Camera, Phone, Bridge, Settings, Config (+ go2rtc source building)
   store.py           JSON persistence (/data/config.json, call_history.json), atomic writes, 0600
   engine.py          Engine (lifecycle, config -> go2rtc/SIP, call routing, camera tools)
-                     BridgeSession (media plumbing for one call)
+                     CameraLink (camera side of any call: mic in, speaker out, gate, keep-alive)
+                     BridgeSession (SIP call <-> CameraLink: pacer, DTMF, watchdog)
+  webcall.py         WebCall (browser call over a WebSocket <-> CameraLink)
   go2rtc.py          go2rtc API client + stream reconciliation + probe parsing
   onvif.py           minimal ONVIF SOAP client (device info, profiles, stream URIs)
   logbuffer.py       in-memory log ring buffer for the UI
@@ -76,9 +78,14 @@ cam2sip/
   web/
     app.py           FastAPI app: auth middleware, REST API, static UI
     auth.py          scrypt password hash, HMAC-signed session cookie
+    tls.py           self-signed certificate for the HTTPS listener (openssl)
     static/          single-page UI (vanilla JS, no build step)
+      app.js         pages, router, forms
+      call.js        CameraCall: browser audio (A-law over WebSocket) + MSE video
+      mic-worklet.js AudioWorklet: mic -> 8 kHz frames (low-pass + resample)
 tests/               pytest: SIP parsing/auth, SDP, G.711, pacer, SIP loopback calls, web API
-tools/sip_test_call.py  live end-to-end call tester (through a real PBX)
+tools/sip_test_call.py      live end-to-end SIP call tester (through a real PBX)
+tools/browser_call_test.py  headless Firefox smoke test of a browser call
 ```
 
 ## 3. Call flows
@@ -192,6 +199,17 @@ phone ──RTP──► RtpEndpoint.on_packet
 
 RFC 4733 telephone-events (deduplicated per RTP timestamp) and SIP INFO (`application/dtmf-relay`) both reach `BridgeSession._on_dtmf`. That handles the hang-up digit and the HTTP webhook actions.
 
+### CameraLink: the shared camera side
+
+`engine.CameraLink` owns everything that talks to the camera during any call:
+
+- the `RtspAudioClient` (mic),
+- the `TalkSession` and the go2rtc play/re-attach loop (speaker),
+- the noise gate (`speak(payload, codec, gain, gate)`),
+- the 1 s silence keep-alive.
+
+`BridgeSession` (SIP) and `WebCall` (browser) are thin adapters around it. A camera is "busy" while any of them holds it (`Engine.busy`).
+
 ## 5. go2rtc integration
 
 | Stream name | Sources | Used for |
@@ -250,6 +268,26 @@ The PBX handles transcoding and security at the edge.
 - Secrets (`password`, `cloud_password`) are write-only. The API returns `""` plus `<field>_set: true`, and an empty value on update keeps the stored one.
 - The UI polls `/api/status` every 2–3 s and `/api/logs?after=<seq>` every 1.5 s on the logs page. It needs no WebSockets, so it works behind any proxy.
 
+## 7a. Browser calls
+
+```
+browser mic ──getUserMedia──► AudioWorklet (low-pass 3.4 kHz, resample → 8 kHz, 20 ms)   [ScriptProcessor fallback]
+            ──A-law encode (JS)──► WebSocket /api/cameras/{id}/talk ──► WebCall ──► CameraLink.speak() ──► camera speaker
+camera mic ──► CameraLink ──► A-law ──► WebSocket (binary) ──► decode + upsample ──► scheduled AudioBuffers (200 ms playout)
+camera video ──► go2rtc MSE ──► WebSocket proxy /api/cameras/{id}/video ──► MediaSource (fMP4 H.264) ──► <video>
+```
+
+- **Transport is a WebSocket through the app itself**, not WebRTC. There are no extra ports or ICE, it works through any HTTPS reverse proxy, go2rtc stays on localhost, and calls reuse `CameraLink` (gate, keep-alive, busy handling, history).
+- **Audio format:** G.711 A-law, 8 kHz, both ways (64 kbit/s each way). It's the camera's native codec, and the browser does the tiny encode/decode itself.
+- **Talk protocol** (`webcall.py` docstring):
+  - binary frames carry audio;
+  - the server sends JSON `status` every second, plus `error`/`ended`;
+  - the browser sends JSON `{"type":"gate","db":-55|null}` (open mic vs push-to-talk) and `hangup`.
+- **Video**: the app proxies go2rtc's `/api/ws?src=c2s_<id>` for that one stream and forwards only `{"type":"mse"}` requests. The browser appends fMP4 segments to a `SourceBuffer` (or `ManagedMediaSource` on Safari) and seeks to stay within ~0.2 s of live. Without MSE/H.264 it falls back to 1 fps JPEG snapshots.
+- **Secure context**: `getUserMedia` and AudioWorklets only exist on HTTPS pages (or localhost). The app therefore runs a second uvicorn listener with TLS on `HTTPS_PORT` (default 8443) inside the same process. That listener starts in the FastAPI lifespan with `lifespan="off"`, and signal handling is left to the main server. A self-signed certificate is generated in `/data/tls` unless `TLS_CERT`/`TLS_KEY` are set. On plain HTTP the call page is listen-only and links to the HTTPS URL.
+- **Auth**: FastAPI HTTP middleware doesn't run for WebSockets, so both endpoints check the session cookie themselves. The cookie is `SameSite=strict`, which blocks cross-site WebSocket hijacking.
+- **Echo / half duplex**: browser `echoCancellation` and `noiseSuppression` are on. Push-to-talk is the default because cameras duck their mic while the speaker plays.
+
 ## 8. Design decisions
 
 | Decision | Why |
@@ -259,6 +297,7 @@ The PBX handles transcoding and security at the edge.
 | G.711 only | Cameras speak G.711 (or get transcoded by go2rtc). Every PBX supports it, and gain/transcode becomes a table lookup. |
 | Host networking | SIP/RTP behind Docker NAT needs port-range proxying and address rewriting, which is fragile. Host networking just works. |
 | RTSP talk server (not publish) | go2rtc *pulls* from us straight into the camera consumer: one hop, and the call lifetime is tied to the TCP connection. |
+| Browser calls over WebSocket, not WebRTC | Same port and proxy path as the UI, go2rtc stays private, and the camera side is shared with SIP calls. The cost is TCP instead of UDP for audio, which is fine on a LAN or over a decent uplink. |
 | JSON file store | The data set is tiny and human-readable. Writes are atomic and there's nothing to migrate. |
 
 ## 9. Known limitations / ideas
@@ -266,4 +305,5 @@ The PBX handles transcoding and security at the edge.
 - One active call per camera; a second caller gets busy (no multi-party mixing).
 - Tapo talk-back needs the TP-Link cloud password, and on newer firmware *Third-Party Compatibility* enabled.
 - Latency is roughly 150–300 ms end to end (camera chunking plus buffers). Fine for an intercom, not for music.
-- Ideas: SIP over TCP/TLS, G.722 wideband, live video preview in the UI (go2rtc MSE through a proxy), MQTT events, multiple cameras per phone (IVR digit selection).
+- Browser calls need HTTPS for the microphone (self-signed on :8443 by default).
+- Ideas: SIP over TCP/TLS, G.722 wideband, video for SIP video phones, MQTT events, multiple cameras per phone (IVR digit selection), WebRTC for browser calls over high-latency links.

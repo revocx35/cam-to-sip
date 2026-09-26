@@ -85,6 +85,7 @@ The speaker source must expose a `sendonly` audio track in go2rtc's probe (that 
 
 | Button | What it does |
 |---|---|
+| **Call** | opens a browser call: live video, camera audio, push-to-talk (see the README's *Browser calls*) |
 | **Check** | probes mic and speaker through go2rtc and shows the codecs |
 | **Listen 4s** | records 4 s from the camera mic and plays it in your browser |
 | **Test speaker** | plays a two-tone chime through the camera speaker, over the same path calls use |

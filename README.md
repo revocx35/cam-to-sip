@@ -4,7 +4,7 @@
 [![Docker image](https://github.com/revocx35/cam-to-sip/actions/workflows/docker.yml/badge.svg)](https://github.com/revocx35/cam-to-sip/pkgs/container/cam-to-sip)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Turn IP cameras into SIP intercoms.** cam2sip registers virtual SIP phones on your PBX and bridges each one to a camera. Call the extension from any desk phone or softphone: **you hear the camera's microphone and your voice comes out of the camera's speaker**. It works the other way too, with the camera calling a phone like a doorbell.
+**Turn IP cameras into SIP intercoms.** cam2sip registers virtual SIP phones on your PBX and bridges each one to a camera. Call the extension from any desk phone or softphone: **you hear the camera's microphone and your voice comes out of the camera's speaker**. It works the other way too, with the camera calling a phone like a doorbell. You can also **call a camera straight from the web UI**, with live video and push-to-talk in the browser.
 
 Runs as a small Docker Compose stack with a web UI for configuration.
 
@@ -22,7 +22,7 @@ Runs as a small Docker Compose stack with a web UI for configuration.
 <td><img src="docs/images/camera-form.png" alt="Camera settings with connection test"></td>
 </tr>
 <tr>
-<td><img src="docs/images/phones.png" alt="Virtual phones"></td>
+<td><img src="docs/images/web-call.png" alt="Browser call with push-to-talk"></td>
 <td><img src="docs/images/bridges.png" alt="Bridges"></td>
 </tr>
 </table>
@@ -36,6 +36,7 @@ Runs as a small Docker Compose stack with a web UI for configuration.
   - **any go2rtc source** (`rtsp://`, `tapo://`, `dvrip://`, `exec:` backchannels, …).
 - **Bridges** link one camera to one phone, with auto-answer after N rings, mic/speaker gain, a noise gate, a caller whitelist and a max call duration.
 - **Outbound "doorbell" calls**: the camera calls an extension or ring group, from the UI or the REST API (Home Assistant, Frigate, Node-RED…).
+- **Browser calls**: click *Call* on a camera to get live video plus two-way audio in the browser, with push-to-talk (button or space bar) or hands-free open mic. No SIP phone needed.
 - **DTMF actions**: a keypad digit fires an HTTP webhook (e.g. *press 1 to open the gate*) and can hang up.
 - **Web UI**: dashboard with live call and media stats, camera snapshots, a *Listen* (mic) test, a *Test speaker* chime, ONVIF stream discovery, call history and live logs.
 - **Lightweight**: pure-Python asyncio SIP/RTP stack (G.711 A-law/μ-law), no Asterisk or PJSIP inside. Transcoding and gain cost one table lookup per byte.
@@ -46,6 +47,7 @@ Runs as a small Docker Compose stack with a web UI for configuration.
 |---|---|
 | PBX | FreePBX 17 (Asterisk 22.10, chan_pjsip, UDP) |
 | Camera | TP-Link **Tapo C212**, firmware 1.5.1: mic via RTSP, speaker via `tapo://` |
+| Browsers | Firefox (full browser call, headless test), Chromium (audio path, headless). Uses standard AudioWorklet + MSE, as in Chrome, Edge and Safari |
 | go2rtc | 1.9.14 |
 | Host | Docker 29 / Compose v5 on Ubuntu (x86-64) |
 
@@ -60,13 +62,13 @@ cp .env.example .env          # optional: ports, admin password, advertised IP
 docker compose up -d --build  # or: docker compose pull && docker compose up -d  (prebuilt amd64/arm64 image)
 ```
 
-Open **http://&lt;server-ip&gt;:8090**, choose an admin password, then:
+Open **http://&lt;server-ip&gt;:8090**, choose an admin password, then follow the steps below. For browser calls with your microphone, use **https://&lt;server-ip&gt;:8443** (see [Browser calls](#browser-calls)).
 
 1. **PBX**: create a SIP extension for the camera (FreePBX: *Applications → Extensions → Add Extension → SIP [chan_pjsip]*). See [docs/freepbx.md](docs/freepbx.md).
 2. **Cameras → Add camera**: for a Tapo, enter the camera IP, the *camera account* (Tapo app → camera → Advanced settings → Camera account) and your **TP-Link cloud password** (needed for the speaker). Click **Test connection**; you should see `Microphone: PCMA/8000` and `Speaker: PCMA/8000`. See [docs/cameras.md](docs/cameras.md).
 3. **Virtual phones → Add phone**: enter the PBX IP, the extension number and its secret. The badge turns green (**registered**).
 4. **Bridges → New bridge**: pick the camera and the phone.
-5. **Call the extension.** You'll hear the camera and can talk through it.
+5. **Call the extension.** You'll hear the camera and can talk through it. Or click **Call** on the camera to talk from your browser.
 
 ## Configuration
 
@@ -74,7 +76,9 @@ All settings are optional environment variables, set in `.env` (see [.env.exampl
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `WEB_PORT` | `8090` | Web UI / REST API port |
+| `WEB_PORT` | `8090` | Web UI / REST API port (HTTP) |
+| `HTTPS_PORT` | `8443` | Same UI over HTTPS, needed for the microphone in browser calls. `0` turns it off |
+| `TLS_CERT` / `TLS_KEY` | *(self-signed)* | Your own certificate/key paths inside the container. Otherwise a self-signed pair is created in `/data/tls` |
 | `ADMIN_PASSWORD` | *(empty)* | Initial admin password (otherwise chosen in the UI on first visit) |
 | `SIP_PORT` | `5062` | Local UDP port shared by all virtual phones |
 | `RTP_PORT_MIN` / `RTP_PORT_MAX` | `16000` / `16199` | UDP range for call audio (one port per call) |
@@ -94,11 +98,12 @@ Both containers use **host networking**. SIP and RTP need real, reachable addres
 | Port | Protocol | From | Purpose |
 |---|---|---|---|
 | 8090 | TCP | admins | Web UI |
+| 8443 | TCP | admins | Web UI over HTTPS (browser calls with microphone) |
 | 5062 | UDP | PBX | SIP signalling |
 | 16000–16199 | UDP | PBX (or phones with direct media) | RTP audio |
 
 ```bash
-sudo ufw allow 8090/tcp && sudo ufw allow 5062/udp && sudo ufw allow 16000:16199/udp
+sudo ufw allow 8090/tcp && sudo ufw allow 8443/tcp && sudo ufw allow 5062/udp && sudo ufw allow 16000:16199/udp
 ```
 
 go2rtc and the talk server listen on `127.0.0.1` only, so the stack can run next to Frigate, whose own go2rtc uses 1984/8554.
@@ -117,6 +122,18 @@ go2rtc and the talk server listen on `127.0.0.1` only, so the stack can run next
 | Hang-up digit / DTMF actions | A digit ends the call and/or fires an HTTP request. |
 
 A camera can only be in one call at a time; a second caller gets `486 Busy Here`.
+
+### Browser calls
+
+Click **Call** on a camera card, or **Call from browser** on the dashboard. The call page shows the camera's live video and plays its microphone.
+
+- **Hold to talk**: press and hold the big button, or the **space bar**, to speak through the camera speaker. This works best, because many cameras (Tapo included) mute their microphone while their speaker plays.
+- **Open microphone**: hands-free, noise-gated. Use headphones to avoid echo.
+- Sliders set the camera volume and how loud you are on the camera. **Hang up** (or leaving the page) ends the call.
+
+Browsers only allow the microphone on **secure pages**. Open the UI at **`https://<server-ip>:8443`** and accept the self-signed certificate once. On plain `http://` you can still listen, and the call page links to the secure version. Behind your own HTTPS reverse proxy that's already covered: enable WebSocket support on the proxy (Nginx Proxy Manager: *Websockets Support*).
+
+Browser calls take the camera like a phone call: while one is running, SIP callers get busy, and vice versa. They appear on the dashboard and in the call history.
 
 ### Doorbell: let the camera call you
 
@@ -157,7 +174,7 @@ Trigger it from a doorbell button, a Frigate `person` event, and so on. The full
 
 - The web UI needs the admin password. The API accepts the session cookie or `Authorization: Bearer <token>`.
 - Camera, cloud and SIP passwords are stored in plain text in `/data/config.json` (file mode 0600), because they're needed to authenticate. Protect the host and the volume.
-- The UI is plain HTTP. For access beyond your LAN, put it behind a TLS reverse proxy (nginx, Caddy, Nginx Proxy Manager) and set `SECURE_COOKIES=true` in `.env`.
+- The UI is served over HTTP (:8090) and HTTPS (:8443) with a self-signed certificate. For access beyond your LAN, put it behind a TLS reverse proxy (nginx, Caddy, Nginx Proxy Manager) with WebSockets enabled, and set `SECURE_COOKIES=true` in `.env`.
 - Inbound SIP is not authenticated (like a desk phone). Keep UDP 5062 reachable from your PBX only, and use *Allowed callers* where it matters.
 
 ## Development
@@ -167,6 +184,8 @@ docker build -t cam2sip-dev -f Dockerfile.dev .            # python + test deps
 docker run --rm -v $PWD:/app -w /app cam2sip-dev python -m pytest -q
 docker run --rm --network host -v $PWD:/app -w /app cam2sip-dev \
   python tools/sip_test_call.py --server <pbx> --user <ext> --password <secret> --target <bridged-ext>
+# browser call smoke test (Firefox + fake mic), see the script's docstring for the docker command
+python tools/browser_call_test.py --password <admin> --camera <camera-id>
 ```
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the code layout and [CLAUDE.md](CLAUDE.md) for contributor notes.
