@@ -70,6 +70,35 @@ Open **http://&lt;server-ip&gt;:8090**, choose an admin password, then follow th
 4. **Bridges → New bridge**: pick the camera and the phone.
 5. **Call the extension.** You'll hear the camera and can talk through it. Or click **Call** on the camera to talk from your browser.
 
+### Deploy without the source (prebuilt image)
+
+[`deploy/docker-compose.yml`](deploy/docker-compose.yml) is a standalone file using `ghcr.io/revocx35/cam-to-sip` (amd64/arm64), with every setting inline:
+
+```bash
+mkdir -p ~/cam2sip && cd ~/cam2sip
+curl -fsSLO https://raw.githubusercontent.com/revocx35/cam-to-sip/main/deploy/docker-compose.yml
+docker compose up -d
+```
+
+Docker inside a Proxmox LXC needs the container options `nesting=1` (plus `keyctl=1` if unprivileged).
+
+### Moving to another host
+
+Your configuration lives in the `cam2sip_cam2sip-data` volume. Leave out `tls/` so the new host gets a certificate for its own IP.
+
+```bash
+# old host
+docker run --rm -v cam2sip_cam2sip-data:/data:ro -v "$PWD":/backup alpine \
+  tar czf /backup/cam2sip-data.tgz --exclude=./tls -C /data .
+docker compose down -v
+
+# new host (in the folder with docker-compose.yml and cam2sip-data.tgz)
+docker compose create
+docker run --rm -v cam2sip_cam2sip-data:/data -v "$PWD":/backup alpine \
+  sh -c "tar xzf /backup/cam2sip-data.tgz -C /data && chown -R 1000:1000 /data"
+docker compose up -d
+```
+
 ## Configuration
 
 All settings are optional environment variables, set in `.env` (see [.env.example](.env.example)):

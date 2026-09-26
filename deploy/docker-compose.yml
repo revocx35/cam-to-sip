@@ -1,0 +1,53 @@
+# cam2sip - standalone deployment with the prebuilt image (no source checkout needed)
+#
+#   mkdir -p ~/cam2sip && cd ~/cam2sip
+#   curl -fsSLO https://raw.githubusercontent.com/revocx35/cam-to-sip/main/deploy/docker-compose.yml
+#   docker compose up -d
+#   open https://<host-ip>:8443   (or http://<host-ip>:8090 - listen-only for browser calls)
+#
+# Both containers use host networking (SIP/RTP need real addresses). Ports on
+# the host: 8090/tcp (UI), 8443/tcp (UI over HTTPS), 5062/udp (SIP),
+# 16000-16199/udp (RTP). go2rtc and the talk server only listen on 127.0.0.1.
+#
+# Docker inside a Proxmox LXC needs the container options nesting=1 (and
+# keyctl=1 for unprivileged containers).
+
+name: cam2sip
+
+services:
+  go2rtc:
+    image: alexxit/go2rtc:1.9.14
+    container_name: cam2sip-go2rtc
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - go2rtc
+      - -config
+      - '{"api":{"listen":"127.0.0.1:11984"},"rtsp":{"listen":"127.0.0.1:18554"},"webrtc":{"listen":""},"srtp":{"listen":""},"log":{"level":"info"}}'
+
+  cam2sip:
+    image: ghcr.io/revocx35/cam-to-sip:1.1   # 1.1.x updates; use :latest to follow main
+    container_name: cam2sip
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - go2rtc
+    environment:
+      CAM2SIP_WEB_PORT: "8090"
+      CAM2SIP_HTTPS_PORT: "8443"          # 0 disables HTTPS (browser calls then listen-only)
+      CAM2SIP_SIP_PORT: "5062"
+      CAM2SIP_RTP_PORT_MIN: "16000"
+      CAM2SIP_RTP_PORT_MAX: "16199"
+      CAM2SIP_ADVERTISE_IP: ""            # empty = auto-detect the interface towards the PBX
+      CAM2SIP_ADMIN_PASSWORD: ""          # empty = choose one in the UI on first visit
+      CAM2SIP_TALK_PORT: "18555"
+      CAM2SIP_GO2RTC_API: http://127.0.0.1:11984
+      CAM2SIP_GO2RTC_RTSP: rtsp://127.0.0.1:18554
+      CAM2SIP_LOG_LEVEL: INFO
+      CAM2SIP_SIP_TRACE: "false"
+      CAM2SIP_SECURE_COOKIES: "false"     # true when served through an HTTPS reverse proxy only
+    volumes:
+      - cam2sip-data:/data                # config.json, call history, TLS certificate
+
+volumes:
+  cam2sip-data:
