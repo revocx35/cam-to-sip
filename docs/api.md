@@ -95,8 +95,8 @@ Camera object:
 {
   "name": "Front door",
   "enabled": true,
-  "camera_id": "2c08d7c4",
-  "phone_id": "b2532b87",
+  "camera_id": "a1b2c3d4",
+  "phone_id": "e5f6a7b8",
   "answer_delay": 0,            // seconds of ringing before auto-answer
   "mic_gain_db": 0,             // camera -> phone
   "speaker_gain_db": 0,         // phone -> camera
