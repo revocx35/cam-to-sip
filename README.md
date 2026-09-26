@@ -1,5 +1,9 @@
 # cam2sip
 
+[![CI](https://github.com/revocx35/cam-to-sip/actions/workflows/ci.yml/badge.svg)](https://github.com/revocx35/cam-to-sip/actions/workflows/ci.yml)
+[![Docker image](https://github.com/revocx35/cam-to-sip/actions/workflows/docker.yml/badge.svg)](https://github.com/revocx35/cam-to-sip/pkgs/container/cam-to-sip)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 **Turn IP cameras into SIP intercoms.** cam2sip registers virtual SIP phones on your PBX and bridges each one to a camera. Call the extension from any desk phone or softphone: **you hear the camera's microphone and your voice comes out of the camera's speaker**. It works the other way too, with the camera calling a phone like a doorbell.
 
 Runs as a small Docker Compose stack with a web UI for configuration.
@@ -53,7 +57,7 @@ Requirements: a Linux host with Docker and Compose, on a network that can reach 
 git clone https://github.com/revocx35/cam-to-sip.git
 cd cam-to-sip
 cp .env.example .env          # optional: ports, admin password, advertised IP
-docker compose up -d --build
+docker compose up -d --build  # or: docker compose pull && docker compose up -d  (prebuilt amd64/arm64 image)
 ```
 
 Open **http://&lt;server-ip&gt;:8090**, choose an admin password, then:
