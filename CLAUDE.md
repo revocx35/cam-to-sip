@@ -1,0 +1,70 @@
+# CLAUDE.md
+
+Guide for AI assistants (and humans) working on this repository.
+
+## What this is
+
+**cam2sip** bridges IP-camera two-way audio to SIP. It registers "virtual phones" (SIP accounts) on a PBX. When one is called, it auto-answers and connects the caller to a camera: camera mic → caller, caller → camera speaker. It can also dial out ("doorbell"). The deliverable is a Docker Compose stack of two containers, `cam2sip` (Python) and `go2rtc` (camera protocols), with a web UI on :8090.
+
+Read [ARCHITECTURE.md](ARCHITECTURE.md) before changing call or media code. It has the component diagram, the call flows and the media pipeline.
+
+## Commands
+
+```bash
+# run the stack (host networking)
+docker compose up -d --build
+docker logs -f cam2sip            # app logs
+docker logs -f cam2sip-go2rtc     # go2rtc logs
+
+# tests: the host may lack python venv/pip, so always use the dev container
+docker build -t cam2sip-dev -f Dockerfile.dev .
+docker run --rm -v $PWD:/app -w /app cam2sip-dev python -m pytest -q          # ~2 s
+
+# live end-to-end call through a real PBX (needs --network host)
+docker run --rm --network host -v $PWD:/app -w /app cam2sip-dev \
+  python tools/sip_test_call.py --server <pbx> --user <ext> --password <secret> --target <bridged-ext>
+
+# inspect go2rtc (bound to localhost only)
+curl -s http://127.0.0.1:11984/api/streams | python3 -m json.tool
+```
+
+Local test-environment details (PBX, camera, credentials, where it's deployed) live in `CLAUDE.local.md`. That file is git-ignored; **never commit credentials**.
+
+## Layout
+
+- `cam2sip/sip/`: own SIP stack. `message.py` parses/builds, `auth.py` does digest, `sdp.py` handles SDP, `stack.py` has UDP + transactions, `ua.py` has accounts + calls.
+- `cam2sip/media/`: `g711.py` (tables), `rtp.py` (RTP socket, `Pacer` jitter buffer), `rtsp.py` (mic client + talk server for go2rtc).
+- `cam2sip/engine.py`: `Engine` (config → go2rtc streams + SIP accounts, call routing) and `BridgeSession` (per-call media).
+- `cam2sip/web/`: FastAPI app plus a no-build vanilla-JS SPA in `static/`.
+- `cam2sip/models.py` / `store.py`: pydantic config persisted to `/data/config.json`.
+- `tests/`: pytest (asyncio mode auto). `tests/test_sip_loopback.py` runs real SIP calls between two in-process UAs.
+- `docs/`: user docs (FreePBX, cameras, API, troubleshooting).
+
+## Conventions
+
+- Everything runs on one asyncio loop (uvicorn's). Never block it: no sync sockets, no `time.sleep`, and no per-sample Python loops on the audio path. Use `g711.convert` (a `bytes.translate` table) for transcoding and gain.
+- Media callbacks (`on_packet`, `on_audio`) run synchronously in the datagram/stream handler. Keep them cheap, and schedule heavier work with `asyncio.create_task`.
+- Only G.711 (PCMA/PCMU) at 8 kHz on the SIP side. Other camera codecs get transcoded by go2rtc (`ffmpeg:` source).
+- Secrets (`password`, `cloud_password`) are write-only in the API: return `""` + `<field>_set`, and keep the stored value when an update sends `""`. `web/app.py:merge()` does this.
+- go2rtc stream names are `c2s_<camera id>` (mic) and `c2s_<camera id>_talk` (speaker). cam2sip owns every `c2s_*` stream and deletes unknown ones.
+- UI: escape all user data with `esc()` in `app.js`. No frameworks and no build step.
+- When you change env vars, API endpoints or behaviour, update `README.md`, the `docs/` pages and `.env.example`.
+- Add or adjust tests for SIP/media changes. The loopback tests catch most dialog bugs quickly.
+
+## Hard-won facts (don't re-learn these)
+
+- **Tapo sends no RTP when only its audio track is SETUP.** The mic URL must ask go2rtc for video too: `rtsp://127.0.0.1:18554/c2s_<id>?video&audio=pcma,pcmu`, while our client SETUPs only the audio track (`Camera.mic_with_video`).
+- **Tapo speaker = `tapo://<cloud password>@ip`** (the TP-Link account password; the username is implicitly `admin`). The camera/RTSP account gives `401`. `tapo://admin:<cloudpw>@` also gives 401 on the C212 fw 1.5.1. The C212 has **no** ONVIF RTSP backchannel, although ONVIF reports an audio output.
+- Tapo mic audio arrives in 1024-byte (128 ms) chunks. Tapo talk mode is `aec`, so the mic is ducked ~10 dB while the speaker plays. That's why the noise gate exists.
+- go2rtc relabels PCMA as dynamic PT 96 on its RTSP server. Read codecs from the SDP rtpmap, not static PTs.
+- go2rtc's RTSP server may assign interleaved channels other than 0. Parse them from the SETUP reply.
+- go2rtc drops an RTSP *source* after 5 s without data. The talk path sends a silence keep-alive every 1 s while the gate is closed.
+- go2rtc runs with an inline `-config` JSON (no file). `PUT /api/streams` then answers `400 config file disabled` but still creates the stream. `Go2rtc.put_stream` ignores that error.
+- `POST /api/streams?dst=<talk stream>&src=<url>` makes go2rtc pull `src` into the backchannel of `dst`. Our `TalkServer` is that `src`. An empty `src` stops playback.
+- Asterisk (FreePBX 17) picks PCMU for extensions even though we offer PCMA first. That's harmless: A↔μ conversion is a table lookup.
+- Asterisk routes a call from extension X to X itself to X's registered contact, so `tools/sip_test_call.py` can use the bridged extension's own credentials as the caller.
+- Client-transaction lingering uses `loop.call_later`, not sleeping tasks. Sleeping tasks made every test take 32 s and slowed shutdown.
+
+## Release
+
+Pushes to `main` run CI (pytest) and build a multi-arch image to `ghcr.io/revocx35/cam-to-sip` (`latest`, `sha-…`, and semver tags for `v*` tags). `docker-compose.yml` has both `build: .` and that image name.

@@ -1,0 +1,51 @@
+# cam2sip - IP camera <-> SIP intercom bridge
+#
+#   cp .env.example .env      # optional: adjust ports / admin password
+#   docker compose up -d --build
+#   open http://<server-ip>:8090
+#
+# Both containers use host networking: SIP and RTP need real, reachable
+# addresses (no Docker NAT), and go2rtc is only reachable on 127.0.0.1.
+
+name: cam2sip
+
+services:
+  go2rtc:
+    image: alexxit/go2rtc:1.9.14
+    container_name: cam2sip-go2rtc
+    restart: unless-stopped
+    network_mode: host
+    # Inline config = no config file: streams are managed by cam2sip via the API.
+    # Everything binds to localhost on non-default ports so it can run next to
+    # Frigate (which ships its own go2rtc on 1984/8554).
+    command:
+      - go2rtc
+      - -config
+      - '{"api":{"listen":"127.0.0.1:${GO2RTC_API_PORT:-11984}"},"rtsp":{"listen":"127.0.0.1:${GO2RTC_RTSP_PORT:-18554}"},"webrtc":{"listen":""},"srtp":{"listen":""},"log":{"level":"${GO2RTC_LOG_LEVEL:-info}"}}'
+
+  cam2sip:
+    build: .
+    image: ghcr.io/revocx35/cam-to-sip:latest
+    container_name: cam2sip
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - go2rtc
+    environment:
+      CAM2SIP_WEB_PORT: ${WEB_PORT:-8090}
+      CAM2SIP_SIP_PORT: ${SIP_PORT:-5062}
+      CAM2SIP_RTP_PORT_MIN: ${RTP_PORT_MIN:-16000}
+      CAM2SIP_RTP_PORT_MAX: ${RTP_PORT_MAX:-16199}
+      CAM2SIP_ADVERTISE_IP: ${ADVERTISE_IP:-}
+      CAM2SIP_ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      CAM2SIP_TALK_PORT: ${TALK_PORT:-18555}
+      CAM2SIP_GO2RTC_API: http://127.0.0.1:${GO2RTC_API_PORT:-11984}
+      CAM2SIP_GO2RTC_RTSP: rtsp://127.0.0.1:${GO2RTC_RTSP_PORT:-18554}
+      CAM2SIP_LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      CAM2SIP_SIP_TRACE: ${SIP_TRACE:-false}
+      CAM2SIP_SECURE_COOKIES: ${SECURE_COOKIES:-false}
+    volumes:
+      - cam2sip-data:/data
+
+volumes:
+  cam2sip-data:

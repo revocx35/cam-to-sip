@@ -1,0 +1,16 @@
+# local configuration & secrets
+.env
+data/
+CLAUDE.local.md
+
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+*.egg-info/
+
+# editors / os
+.idea/
+.vscode/
+.DS_Store
