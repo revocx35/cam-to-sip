@@ -103,6 +103,18 @@ def convert(payload: bytes, src: str, dst: str, gain_db: float = 0.0) -> bytes:
     return payload if table is None else payload.translate(table)
 
 
+@lru_cache(maxsize=2)
+def _linear_table(codec: str) -> bytes:
+    enc = ENCODE[codec]
+    return bytes(enc(i - 32768) for i in range(65536))
+
+
+def encode_pcm(samples, codec: str) -> bytes:
+    """Encode 16-bit linear samples (any iterable of ints) to G.711 bytes."""
+    table = _linear_table(codec)
+    return bytes(table[s + 32768] for s in samples)
+
+
 def level_dbfs(payload: bytes, codec: str) -> float:
     """RMS level of a G.711 frame in dBFS (-96 for digital silence)."""
     if not payload:

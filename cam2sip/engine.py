@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import array
 import asyncio
 import logging
 import secrets
@@ -17,6 +18,7 @@ from .media.rtsp import RtspAudioClient, TalkServer
 from .models import Bridge, Camera
 from .settings import Settings
 from .sip.ua import AccountConfig, Call, UserAgent
+from .sounds import SoundLibrary
 from .store import Store
 from .webcall import WebCall
 
@@ -53,11 +55,14 @@ class CameraLink:
         self.tasks: list[asyncio.Task] = []
         self._gate_open_until = 0.0
         self._last_talk_push = 0.0
+        # privacy notice: the microphone stays closed until the notice has played
+        self.notice_state = "pending" if camera.notify_enabled else "none"
+        self.mic_open = not camera.notify_enabled
 
     def start(self) -> None:
         cam = self.camera
         url = self.engine.go2rtc.rtsp_url(cam.stream_name, mic_query(cam))
-        self.mic = RtspAudioClient(url, self.on_mic)
+        self.mic = RtspAudioClient(url, self._mic_audio)
         self.tasks.append(asyncio.create_task(self.mic.run()))
         if cam.talk_source():
             self.talk = self.engine.talk_server.create()
@@ -76,10 +81,54 @@ class CameraLink:
     def speaking(self) -> bool:
         return time.monotonic() < self._gate_open_until
 
+    def _mic_audio(self, codec: str, payload: bytes) -> None:
+        if self.mic_open:
+            self.on_mic(codec, payload)
+
+    # -- privacy notice ----------------------------------------------------------------
+    def start_notice(self) -> None:
+        """Call when the call is connected: plays the camera's call notice, then opens the mic."""
+        if self.notice_state == "pending" and not any(t.get_name() == "notice" for t in self.tasks):
+            self.tasks.append(asyncio.create_task(self._notice(), name="notice"))
+
+    async def _notice(self) -> None:
+        cam = self.camera
+        played = False
+        try:
+            pcm = await self.engine.prompt_pcm(cam.notify_text, cam.notify_sound, cam.notify_voice, cam.notify_speed)
+            talk = self.talk
+            if not talk:
+                log.warning("[%s] call notice skipped: camera has no speaker source", cam.name)
+                return
+            try:
+                await asyncio.wait_for(talk.connected.wait(), 10)
+            except TimeoutError:
+                log.warning("[%s] call notice skipped: speaker did not connect", cam.name)
+                return
+            self.notice_state = "playing"
+            codec = talk.codec or "PCMA"
+            data = g711.encode_pcm(pcm, codec)
+            loop = asyncio.get_running_loop()
+            t = loop.time()
+            for i in range(0, len(data), 160):
+                frame = data[i:i + 160]
+                self._push(frame, time.monotonic())
+                self.on_mic(codec, frame)            # the far end hears the notice too
+                t += len(frame) / 8000
+                await asyncio.sleep(max(0.0, t - loop.time()))
+            await asyncio.sleep(0.5)                 # let the camera finish playing its buffer
+            played = True
+            log.info("[%s] call notice played (%.1f s)", cam.name, len(pcm) / 8000)
+        except Exception as e:
+            log.warning("[%s] call notice failed: %s", cam.name, e)
+        finally:
+            self.notice_state = "played" if played else "skipped"
+            self.mic_open = True
+
     def speak(self, payload: bytes, codec: str, gain_db: float = 0.0, gate_db: float | None = None) -> None:
         """Send one far-end audio frame towards the camera speaker (noise-gated)."""
         talk = self.talk
-        if not talk or not talk.codec:
+        if not talk or not talk.codec or self.notice_state in ("pending", "playing"):
             return
         now = time.monotonic()
         if gate_db is None or g711.level_dbfs(payload, codec) >= gate_db:
@@ -132,7 +181,9 @@ class CameraLink:
                 "connected": bool(self.mic and self.mic.connected.is_set()),
                 "codec": self.mic.codec if self.mic else None,
                 "error": self.mic.error if self.mic else None,
+                "muted": not self.mic_open,
             },
+            "notice": self.notice_state,
             "speaker": {
                 "state": self.talk_state if self.talk else "none",
                 "codec": self.talk.codec if self.talk else None,
@@ -195,7 +246,7 @@ class BridgeSession:
         await self._disconnect()
 
     # -- camera attach / detach -------------------------------------------------------
-    def _connect(self, camera: Camera) -> None:
+    def _connect(self, camera: Camera, auto_notice: bool = True) -> None:
         """Attach a camera (the caller must already hold engine.busy[camera.id])."""
         self.camera = camera
         self.link = CameraLink(self.engine, camera, self._on_mic)
@@ -206,6 +257,15 @@ class BridgeSession:
         self.phase = "connected"
         if not self.visited or self.visited[-1] != camera.name:
             self.visited.append(camera.name)
+        if auto_notice:
+            self.tasks.append(asyncio.create_task(self._begin_notice(self.link)))
+
+    async def _begin_notice(self, link: CameraLink) -> None:
+        # the notice starts once the call is up and our own prompts have finished
+        await self.call.answered.wait()
+        await self._prompt_done.wait()
+        if self.link is link:
+            link.start_notice()
 
     async def _disconnect(self) -> None:
         link, cam = self.link, self.camera
@@ -244,11 +304,12 @@ class BridgeSession:
         self._prompt = b""
         self._prompt_done.set()
 
-    async def _say(self, text: str) -> None:
-        if not text.strip():
+    async def _say(self, text: str, sound: str = "") -> None:
+        if not text.strip() and not sound:
             return
         b = self.bridge
-        self._play(await self.engine.tts.encoded(text, b.ivr_voice, b.ivr_speed, self.phone_codec))
+        pcm = await self.engine.prompt_pcm(text, sound, b.ivr_voice, b.ivr_speed)
+        self._play(g711.encode_pcm(pcm, self.phone_codec))
         await self._prompt_done.wait()
 
     # -- IVR menu ----------------------------------------------------------------------------
@@ -274,8 +335,7 @@ class BridgeSession:
         await self.call.answered.wait()
         await asyncio.sleep(0.4)          # let the media path settle before speaking
         options = {o.digit: o for o in b.ivr_options}
-        text = tts.menu_text(b.ivr_greeting, b.ivr_option_text, [(o.digit, self._label(o)) for o in b.ivr_options])
-        menu_audio = await engine.tts.encoded(text, b.ivr_voice, b.ivr_speed, self.phone_codec)
+        menu_audio = g711.encode_pcm(await engine.menu_pcm(b), self.phone_codec)
         for _ in range(b.ivr_repeats):
             if self.call.state != "active":
                 return
@@ -289,20 +349,22 @@ class BridgeSession:
             cam = engine.store.camera(opt.camera_id) if opt else None
             if not opt or not cam or not cam.enabled:
                 log.info("IVR: invalid choice %s", digit)
-                await self._say(b.ivr_invalid_text)
+                await self._say(b.ivr_invalid_text, b.ivr_invalid_sound)
                 continue
             name = self._label(opt)
             if cam.id in engine.busy:
                 log.info("IVR: %s is busy", cam.name)
-                await self._say(tts.fill(b.ivr_busy_text, name=name))
+                await self._say(tts.fill(b.ivr_busy_text, name=name), b.ivr_busy_sound)
                 continue
             engine.busy[cam.id] = self.call
             log.info("IVR: caller %s chose %s -> %s", self.call.remote_user or "?", digit, cam.name)
-            self._connect(cam)             # camera connects while the confirmation plays
-            await self._say(tts.fill(b.ivr_connect_text, name=name))
+            self._connect(cam, auto_notice=False)   # camera connects while the confirmation plays
+            await self._say(tts.fill(b.ivr_connect_text, name=name), b.ivr_connect_sound)
+            if self.link:
+                self.link.start_notice()           # then the privacy notice (if enabled)
             return
         if self.call.state == "active":
-            await self._say(b.ivr_goodbye_text)
+            await self._say(b.ivr_goodbye_text, b.ivr_goodbye_sound)
             await self.call.hangup("no menu selection")
 
     async def _back_to_menu(self) -> None:
@@ -408,6 +470,7 @@ class Engine:
         self.go2rtc = Go2rtc(settings.go2rtc_api, settings.go2rtc_rtsp)
         self.talk_server = TalkServer("127.0.0.1", settings.talk_port)
         self.tts = tts.Tts()
+        self.sounds = SoundLibrary(store)
         self.busy: dict[str, Call] = {}                # camera id -> call
         self.sessions: dict[str, BridgeSession] = {}   # call id -> session
         self.call_meta: dict[str, dict] = {}           # call id -> bridge/camera/phone ids
@@ -459,18 +522,46 @@ class Engine:
         asyncio.create_task(self._prewarm_prompts())
 
     async def _prewarm_prompts(self) -> None:
-        """Synthesize IVR menus ahead of time so callers don't wait for TTS."""
-        for b in self.store.config.bridges:
-            if b.mode != "ivr" or not b.enabled:
+        """Synthesize IVR menus and call notices ahead of time so callers don't wait for TTS."""
+        try:
+            for b in self.store.config.bridges:
+                if b.mode == "ivr" and b.enabled:
+                    await self.menu_pcm(b)
+            for cam in self.store.config.cameras:
+                if cam.notify_enabled:
+                    await self.prompt_pcm(cam.notify_text, cam.notify_sound, cam.notify_voice, cam.notify_speed)
+        except Exception as e:
+            log.debug("prompt prewarm failed: %s", e)
+
+    # -- prompts (text-to-speech or uploaded sounds) ----------------------------------------
+    async def prompt_pcm(self, text: str, sound: str, voice: str, speed: int):
+        """8 kHz samples of an uploaded sound, or of `text` spoken by TTS."""
+        pcm = self.sounds.load(sound) if sound else None
+        if pcm is not None:
+            return pcm
+        if sound:
+            log.warning("sound %s not found - using text-to-speech", sound)
+        return await self.tts.pcm(text, voice, speed)
+
+    async def menu_pcm(self, b) -> "array.array":
+        """The full IVR menu: greeting + one line per option (TTS and/or uploaded sounds)."""
+        def label(o) -> str:
+            cam = self.store.camera(o.camera_id)
+            return o.label.strip() if o.label.strip() else (cam.name if cam else f"camera {o.digit}")
+        if not b.ivr_greeting_sound and not any(o.sound for o in b.ivr_options):
+            text = tts.menu_text(b.ivr_greeting, b.ivr_option_text, [(o.digit, label(o)) for o in b.ivr_options])
+            return await self.tts.pcm(text, b.ivr_voice, b.ivr_speed)
+        gap = array.array("h", bytes(2 * 2400))          # 0.3 s between parts
+        out = array.array("h")
+        parts = [(b.ivr_greeting, b.ivr_greeting_sound)]
+        parts += [(tts.fill(b.ivr_option_text, digit=o.digit, name=label(o)), o.sound) for o in b.ivr_options]
+        for text, sound in parts:
+            if not text.strip() and not sound:
                 continue
-            names = []
-            for o in b.ivr_options:
-                cam = self.store.camera(o.camera_id)
-                names.append((o.digit, o.label.strip() or (cam.name if cam else o.digit)))
-            try:
-                await self.tts.pcm(tts.menu_text(b.ivr_greeting, b.ivr_option_text, names), b.ivr_voice, b.ivr_speed)
-            except Exception as e:
-                log.debug("prompt prewarm failed: %s", e)
+            if out:
+                out.extend(gap)
+            out.extend(await self.prompt_pcm(text, sound, b.ivr_voice, b.ivr_speed))
+        return out
 
     # -- calls ----------------------------------------------------------------------------
     def _phone_for_account(self, account_id: str):
@@ -669,7 +760,11 @@ class Engine:
     async def snapshot(self, camera: Camera) -> bytes:
         return await self.go2rtc.snapshot(camera.stream_name)
 
-    async def test_speaker(self, camera: Camera, seconds: float = 2.0) -> dict:
+    async def test_notice(self, camera: Camera, text: str, sound: str, voice: str, speed: int) -> dict:
+        pcm = await self.prompt_pcm(text, sound, voice, speed)
+        return await self.test_speaker(camera, pcm=pcm)
+
+    async def test_speaker(self, camera: Camera, seconds: float = 2.0, pcm=None) -> dict:
         if camera.id in self.busy:
             raise CameraBusy("camera is in a call")
         if not camera.talk_source():
@@ -679,8 +774,11 @@ class Engine:
             await self.go2rtc.play(camera.talk_stream_name, talk.url)
             await asyncio.wait_for(talk.connected.wait(), 10)
             codec = talk.codec or "PCMA"
-            chime = (g711.tone(codec, 660, 0.35, -9) + g711.silence(codec, 400)
-                     + g711.tone(codec, 880, 0.5, -9))
+            if pcm is not None:
+                chime = g711.encode_pcm(pcm, codec)
+            else:
+                chime = (g711.tone(codec, 660, 0.35, -9) + g711.silence(codec, 400)
+                         + g711.tone(codec, 880, 0.5, -9))
             loop = asyncio.get_running_loop()
             t = loop.time()
             for i in range(0, len(chime), 160):

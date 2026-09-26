@@ -37,6 +37,8 @@ Runs as a small Docker Compose stack with a web UI for configuration.
 - **Bridges** link one camera to one phone, with auto-answer after N rings, mic/speaker gain, a noise gate, a caller whitelist and a max call duration.
 - **Outbound "doorbell" calls**: the camera calls an extension or ring group, from the UI or the REST API (Home Assistant, Frigate, Node-RED…).
 - **IVR camera menu**: one virtual phone can serve several cameras. Callers hear a spoken menu (*"Press 1 for Front door. Press 2 for Garage."*), press a digit, and can press `*` during the call to switch. Prompts are offline text-to-speech (espeak-ng) with 100+ languages.
+- **Call notice (privacy)**: per camera, announce *"A call has started on this camera"* (your own text, or an uploaded recording) on the camera speaker when any call connects. The camera mic stays muted until it has played.
+- **Uploaded sounds**: use your own recordings (MP3, WAV, OGG, M4A…) for IVR prompts and call notices instead of text-to-speech.
 - **Browser calls**: click *Call* on a camera to get live video plus two-way audio in the browser, with push-to-talk (button or space bar) or hands-free open mic. No SIP phone needed.
 - **DTMF actions**: a keypad digit fires an HTTP webhook (e.g. *press 1 to open the gate*) and can hang up.
 - **Web UI**: dashboard with live call and media stats, camera snapshots, a *Listen* (mic) test, a *Test speaker* chime, ONVIF stream discovery, call history and live logs.
@@ -49,6 +51,7 @@ Runs as a small Docker Compose stack with a web UI for configuration.
 | PBX | FreePBX 17 (Asterisk 22.10, chan_pjsip, UDP) |
 | Camera | TP-Link **Tapo C212**, firmware 1.5.1: mic via RTSP, speaker via `tapo://` |
 | IVR | English and Turkish prompts (espeak-ng 1.52), RFC 4733 DTMF, menu → camera → `*` → other camera |
+| Sounds / notice | MP3 upload decoded in Chromium, call notice played on the C212 before the mic opened |
 | Browsers | Firefox (full browser call, headless test), Chromium (audio path, headless). Uses standard AudioWorklet + MSE, as in Chrome, Edge and Safari |
 | go2rtc | 1.9.14 |
 | Host | Docker 29 / Compose v5 on Ubuntu (x86-64) |
@@ -167,6 +170,27 @@ In **Bridges → New bridge**, set *When the phone is called* to **Play a menu t
 - **Voice / language**: any espeak-ng voice, e.g. `en-us`, `en-gb`, `de`, `fr`, `tr`. Write the prompt texts in the same language, and use **Preview menu** to hear it in the browser.
 - DTMF works with RFC 4733 telephone-events (the FreePBX default), SIP INFO, and in-band tones as a fallback.
 - Doorbell calls from an IVR bridge (**Call…**/API) connect straight to one of its cameras (`camera_id` in the API).
+
+### Call notice (privacy)
+
+In a camera's settings, enable **Call notice**:
+
+![Call notice settings](docs/images/call-notice.png)
+
+- When **any** call connects to that camera (SIP direct or IVR, doorbell, browser call), the announcement plays on the **camera speaker** first.
+- The **camera microphone stays muted** until the notice has finished, and the caller's voice is held back while it plays. The caller hears the notice too, so they know why there is a short pause.
+- The announcement is typed text (spoken by text-to-speech in the chosen voice/language) or an uploaded sound. **Preview** plays it in your browser; **Play on camera** plays it on the camera speaker.
+- It needs the camera's speaker (for a Tapo, the TP-Link cloud password). Without a working speaker the notice is skipped after 10 s and a warning is logged.
+
+### Uploaded sounds
+
+Use your own recordings instead of text-to-speech. Upload them from **Settings → Sounds**, from the IVR section of a bridge, or from a camera's call notice section.
+
+- Any format your browser can play works (MP3, WAV, OGG, M4A/AAC, FLAC, Opus). The browser converts it to 8 kHz telephone audio before uploading; max 120 s.
+- Every IVR prompt (greeting, each menu option, invalid, busy, connecting, goodbye) has a *Text-to-speech / sound* selector. A sound replaces that prompt's text.
+- **Settings → Sounds** lists all sounds with a player, where they're used, rename and delete. Sounds that are still in use can't be deleted.
+
+![IVR prompts with an uploaded greeting](docs/images/ivr-sounds.png)
 
 ### Browser calls
 

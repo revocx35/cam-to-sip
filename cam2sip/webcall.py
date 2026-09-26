@@ -83,6 +83,7 @@ class WebCall:
         """Serve the call until the browser disconnects or it is hung up."""
         log.info("web call %s to %s started from %s", self.id, self.camera.name, self.client)
         self.link.start()
+        self.link.start_notice()          # privacy notice (if enabled) before audio is shared
         tasks = [asyncio.create_task(self._sender()), asyncio.create_task(self._status()),
                  asyncio.create_task(self._receiver()), asyncio.create_task(self._done.wait())]
         try:

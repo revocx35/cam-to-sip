@@ -55,6 +55,16 @@ Start with **Logs** in the web UI, or `docker logs -f cam2sip`. For SIP problems
 | Hangs up after the menu | No key pressed within *Repeat menu* × (menu length + *Wait after menu*) |
 | `*` doesn't return to the menu | Only in IVR bridges, and only when `*` is the *back-to-menu digit* (and not the hang-up digit) |
 
+## Call notice & sounds
+
+| Symptom | Cause / fix |
+|---|---|
+| Notice isn't heard on the camera | It needs the camera speaker: use **Play on camera** in the camera form. A Tapo needs the cloud password; see *Speaker* above. Without a speaker the notice is skipped after 10 s (logged) and the call continues |
+| Caller hears silence for a few seconds | Expected while the notice plays (the caller hears the notice itself; the camera mic opens right after) |
+| "Your browser can't decode …" on upload | Use a common format (MP3, WAV, OGG, M4A). Very new or exotic codecs may not be supported by your browser |
+| "sound is used by …" when deleting | Change the camera notice / bridge prompts that use it back to text-to-speech (or another sound) first |
+| Uploaded sound is quiet/loud | Sounds are normalised to about -6 dBFS peak. Use *mic gain* on the bridge for the camera side, or re-record |
+
 ## Browser calls
 
 | Symptom | Cause / fix |

@@ -62,6 +62,7 @@ cam2sip/
                      CameraLink (camera side of any call: mic in, speaker out, gate, keep-alive)
                      BridgeSession (SIP call <-> CameraLink: pacer, prompts, IVR menu, DTMF, watchdog)
   webcall.py         WebCall (browser call over a WebSocket <-> CameraLink)
+  sounds.py          SoundLibrary: uploaded prompt audio (WAV -> 8 kHz mono, /data/sounds/<id>.wav)
   go2rtc.py          go2rtc API client + stream reconciliation + probe parsing
   onvif.py           minimal ONVIF SOAP client (device info, profiles, stream URIs)
   logbuffer.py       in-memory log ring buffer for the UI
@@ -155,6 +156,8 @@ stateDiagram-v2
 ```
 
 - **Prompts.** The spoken menu is `greeting + option_text per option`, synthesized by espeak-ng (22.05 kHz), low-passed, resampled to 8 kHz, peak-normalised and cached as PCM and per-codec G.711. Menus are pre-rendered on config apply.
+- **Uploaded sounds.** Every prompt field has an optional sound id (`ivr_greeting_sound`, `IvrOption.sound`, …), and `Engine.prompt_pcm(text, sound, voice, speed)` prefers the sound. When a menu mixes sounds and text, `Engine.menu_pcm()` renders each part separately and joins them with 0.3 s gaps.
+- **Sound conversion.** The browser decodes the upload (`decodeAudioData`) and resamples it with an `OfflineAudioContext` at 8 kHz, then posts a 16-bit WAV. The server re-validates any PCM WAV (`sounds.wav_to_8k`: any rate, 8–32-bit, stereo downmix, normalise). So the image needs no ffmpeg.
 - **Priority on the 20 ms clock.** Prompt frames replace camera frames in `BridgeSession._to_phone()`. So "Connecting to …" plays while the new camera's RTSP/talk connections come up; the camera audio buffered meanwhile is trimmed by the Pacer.
 - **Barge-in.** In the menu phase any digit is queued and immediately stops the current prompt. A digit queued during an announcement skips the next menu replay.
 - **Digits.** They arrive via RFC 4733 (deduplicated by RTP timestamp), SIP INFO, or the Goertzel detector when no telephone-event was negotiated. While connected, the menu digit returns to the menu; other digits go to the hang-up digit / DTMF actions.
@@ -230,7 +233,21 @@ RFC 4733 telephone-events (deduplicated per RTP timestamp) and SIP INFO (`applic
 - the noise gate (`speak(payload, codec, gain, gate)`),
 - the 1 s silence keep-alive.
 
-`BridgeSession` (SIP) and `WebCall` (browser) are thin adapters around it. A camera is "busy" while any of them holds it (`Engine.busy`).
+`BridgeSession` (SIP) and `WebCall` (browser) are thin adapters around it.
+
+**Call notice (privacy).** With `Camera.notify_enabled`, a new link starts with `mic_open = False` and `notice_state = "pending"`. The owner calls `link.start_notice()` once the call is really connected:
+
+- `BridgeSession` does this after the call is answered and its own prompts have finished. In the IVR path that's right after "Connecting to …".
+- `WebCall` does it immediately.
+
+`_notice()` then works like this:
+
+1. It waits (up to 10 s) for the talk stream to attach.
+2. It paces the announcement in 20 ms frames into the camera speaker, and feeds the same frames to `on_mic`, so the caller hears the notice through their normal audio path.
+3. It drops far-end audio in `speak()` while the notice plays.
+4. After a 0.5 s drain it sets `mic_open = True`.
+
+Until then, real microphone audio is discarded in `_mic_audio()`. A camera is "busy" while any of them holds it (`Engine.busy`).
 
 ## 5. go2rtc integration
 
@@ -329,4 +346,4 @@ camera video ──► go2rtc MSE ──► WebSocket proxy /api/cameras/{id}/vi
 - Latency is roughly 150–300 ms end to end (camera chunking plus buffers). Fine for an intercom, not for music.
 - Browser calls need HTTPS for the microphone (self-signed on :8443 by default).
 - IVR prompts use espeak-ng, which is intelligible but robotic. Neural TTS (e.g. Piper) or uploaded recordings would sound better at the cost of image size.
-- Ideas: SIP over TCP/TLS, G.722 wideband, video for SIP video phones, MQTT events, recorded/uploaded IVR prompts, WebRTC for browser calls over high-latency links.
+- Ideas: SIP over TCP/TLS, G.722 wideband, video for SIP video phones, MQTT events, recording prompts straight from the browser microphone, WebRTC for browser calls over high-latency links.

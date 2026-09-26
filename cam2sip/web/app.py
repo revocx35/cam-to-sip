@@ -22,7 +22,8 @@ from .. import onvif
 from ..media import tts as tts_mod
 from ..engine import CameraBusy, Engine
 from ..logbuffer import LogBuffer
-from ..models import SECRET_FIELDS, Bridge, Camera, Phone, redact
+from ..models import SECRET_FIELDS, Bridge, Camera, IvrOption, Phone, redact
+from ..sounds import MAX_UPLOAD_BYTES, to_wav
 from ..settings import Settings
 from ..store import Store
 from . import auth
@@ -48,12 +49,25 @@ class DialBody(BaseModel):
 
 
 class IvrPreviewBody(BaseModel):
-    ivr_options: list[dict] = []
+    ivr_options: list[IvrOption] = []
     ivr_greeting: str = ""
+    ivr_greeting_sound: str = ""
     ivr_option_text: str = "Press {digit} for {name}."
     ivr_voice: str = "en-us"
     ivr_speed: int = 150
-    text: str | None = None       # speak this instead of the composed menu
+    text: str | None = None       # a single prompt instead of the composed menu
+    sound: str = ""               # ... or an uploaded sound
+
+
+class NoticeBody(BaseModel):
+    notify_text: str | None = None
+    notify_sound: str | None = None
+    notify_voice: str | None = None
+    notify_speed: int | None = None
+
+
+class RenameBody(BaseModel):
+    name: str
 
 
 class DiscoverBody(BaseModel):
@@ -249,6 +263,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/cameras")
     async def create_camera(payload: dict):
         cam = merge(Camera, None, {k: v for k, v in payload.items() if k != "id"})
+        check_sounds([cam.notify_sound])
         cfg.cameras.append(cam)
         await save_and_apply()
         log.info("camera '%s' added", cam.name)
@@ -259,6 +274,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def update_camera(cid: str, payload: dict):
         old = find(cfg.cameras, cid)
         cam = merge(Camera, old, payload)
+        check_sounds([cam.notify_sound])
         cfg.cameras[cfg.cameras.index(old)] = cam
         engine.probes.pop(cid, None)
         await save_and_apply()
@@ -314,6 +330,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception as e:
             raise HTTPException(502, f"speaker test failed: {e or 'timeout'}") from e
 
+    @app.post("/api/cameras/{cid}/test-notice")
+    async def test_notice(cid: str, body: NoticeBody):
+        """Play the call notice (saved or the values in the body) on the camera speaker."""
+        cam = find(cfg.cameras, cid)
+        try:
+            return await engine.test_notice(
+                cam, body.notify_text if body.notify_text is not None else cam.notify_text,
+                body.notify_sound if body.notify_sound is not None else cam.notify_sound,
+                body.notify_voice or cam.notify_voice, body.notify_speed or cam.notify_speed)
+        except CameraBusy as e:
+            raise HTTPException(409, str(e)) from e
+        except Exception as e:
+            raise HTTPException(502, f"notice test failed: {e or 'timeout'}") from e
+
     @app.get("/api/cameras/{cid}/mic.wav")
     async def mic_wav(cid: str, seconds: float = 4.0):
         cam = find(cfg.cameras, cid)
@@ -365,6 +395,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # -- bridges --------------------------------------------------------------------------------
     def check_bridge(b: Bridge, exclude: str | None = None) -> None:
+        check_sounds(b.sound_ids())
         for cid in b.camera_ids():
             if not store.camera(cid):
                 raise HTTPException(422, "camera_id: unknown camera")
@@ -424,19 +455,69 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/ivr/preview")
     async def ivr_preview(body: IvrPreviewBody):
-        """Render the spoken menu (or `text`) as a WAV file for the browser."""
-        if body.text is not None:
-            text = body.text
+        """Render the menu (or a single prompt) as a WAV file for the browser."""
+        body.ivr_speed = max(80, min(300, body.ivr_speed))
+        body.ivr_voice = body.ivr_voice or "en-us"
+        if body.text is not None or body.sound:
+            pcm = await engine.prompt_pcm((body.text or "")[:2000], body.sound, body.ivr_voice, body.ivr_speed)
         else:
-            names = []
-            for o in body.ivr_options:
-                cam = store.camera(str(o.get("camera_id", "")))
-                label = str(o.get("label") or "").strip() or (cam.name if cam else "camera")
-                names.append((str(o.get("digit", "?")), label))
-            text = tts_mod.menu_text(body.ivr_greeting, body.ivr_option_text, names)
-        speed = max(80, min(300, body.ivr_speed))
-        data = await engine.tts.wav(text[:2000], body.ivr_voice or "en-us", speed)
-        return Response(data, media_type="audio/wav", headers={"Cache-Control": "no-store"})
+            pcm = await engine.menu_pcm(body)
+        return Response(to_wav(pcm), media_type="audio/wav", headers={"Cache-Control": "no-store"})
+
+    # -- sounds ---------------------------------------------------------------------------------
+    def sound_users(sid: str) -> list[str]:
+        users = [f"camera '{c.name}'" for c in cfg.cameras if c.notify_sound == sid]
+        users += [f"bridge '{b.name or b.id}'" for b in cfg.bridges if sid in b.sound_ids()]
+        return users
+
+    def check_sounds(ids) -> None:
+        for sid in ids:
+            if sid and not engine.sounds.get(sid):
+                raise HTTPException(422, "unknown sound - it may have been deleted")
+
+    @app.get("/api/sounds")
+    async def list_sounds():
+        return [dict(s.model_dump(), used_by=sound_users(s.id)) for s in cfg.sounds]
+
+    @app.post("/api/sounds")
+    async def upload_sound(request: Request, name: str = "sound"):
+        """Body: a PCM WAV file (the web UI converts other formats in the browser)."""
+        if int(request.headers.get("content-length") or 0) > MAX_UPLOAD_BYTES:
+            raise HTTPException(413, "file too large")
+        data = await request.body()
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(413, "file too large")
+        try:
+            sound = engine.sounds.add(name, data)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        return sound.model_dump()
+
+    @app.put("/api/sounds/{sid}")
+    async def rename_sound(sid: str, body: RenameBody):
+        sound = engine.sounds.get(sid)
+        if not sound:
+            raise HTTPException(404, "not found")
+        sound.name = body.name.strip()[:80] or sound.name
+        store.save()
+        return sound.model_dump()
+
+    @app.delete("/api/sounds/{sid}")
+    async def delete_sound(sid: str):
+        if not engine.sounds.get(sid):
+            raise HTTPException(404, "not found")
+        users = sound_users(sid)
+        if users:
+            raise HTTPException(409, f"sound is used by {', '.join(users)}")
+        engine.sounds.delete(sid)
+        return {"ok": True}
+
+    @app.get("/api/sounds/{sid}.wav")
+    async def sound_file(sid: str):
+        pcm = engine.sounds.load(sid)
+        if pcm is None:
+            raise HTTPException(404, "not found")
+        return Response(to_wav(pcm), media_type="audio/wav", headers={"Cache-Control": "no-store"})
 
     # -- calls ----------------------------------------------------------------------------------
     @app.get("/api/calls")

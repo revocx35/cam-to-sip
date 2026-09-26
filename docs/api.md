@@ -35,6 +35,7 @@ Secret fields (`password`, `cloud_password`) are never returned. Responses conta
 | GET | `/cameras/{id}/snapshot.jpg` | JPEG snapshot |
 | GET | `/cameras/{id}/mic.wav?seconds=4` | record the microphone (1–15 s) |
 | POST | `/cameras/{id}/test-speaker` | play a chime on the speaker |
+| POST | `/cameras/{id}/test-notice` | play the call notice on the speaker; body may override `notify_text`, `notify_sound`, `notify_voice`, `notify_speed` |
 
 Camera object:
 
@@ -52,7 +53,12 @@ Camera object:
   "cloud_password": "…",        // tapo only, write-only
   "listen_url": "",             // custom only: go2rtc source for the mic
   "talk_url": "",               // custom only: go2rtc source for the speaker
-  "mic_with_video": true
+  "mic_with_video": true,
+  "notify_enabled": false,      // privacy call notice on the camera speaker
+  "notify_text": "Attention please. A call has started on this camera.",
+  "notify_sound": "",           // uploaded sound id; overrides notify_text
+  "notify_voice": "en-us",
+  "notify_speed": 150
 }
 ```
 
@@ -120,7 +126,7 @@ IVR bridge (`mode: "ivr"`), in addition to the common fields above:
   "mode": "ivr",
   "ivr_options": [
     {"digit": "1", "camera_id": "a1b2c3d4", "label": ""},            // label = spoken name, default camera name
-    {"digit": "2", "camera_id": "c9d8e7f6", "label": "the garage"}
+    {"digit": "2", "camera_id": "c9d8e7f6", "label": "the garage", "sound": ""}   // sound replaces the spoken line
   ],
   "ivr_greeting": "Hello.",
   "ivr_option_text": "Press {digit} for {name}.",
@@ -132,7 +138,9 @@ IVR bridge (`mode: "ivr"`), in addition to the common fields above:
   "ivr_speed": 150,                              // words per minute, 80-300
   "ivr_timeout": 8,                              // seconds to wait after the menu
   "ivr_repeats": 3,                              // menu repetitions before hanging up
-  "menu_digit": "*"                              // during a camera call: back to the menu
+  "menu_digit": "*",                             // during a camera call: back to the menu
+  "ivr_greeting_sound": "",                      // uploaded sound ids replacing the texts above
+  "ivr_invalid_sound": "", "ivr_busy_sound": "", "ivr_connect_sound": "", "ivr_goodbye_sound": ""
 }
 ```
 
@@ -148,6 +156,23 @@ These are used by the web UI's call page. They authenticate with the session coo
 | `WS /cameras/{id}/video` | both | go2rtc's MSE protocol for this camera only. Send `{"type":"mse","value":"avc1.640029,..."}`; you receive `{"type":"mse","value":"video/mp4; codecs=..."}` followed by binary fMP4 segments |
 
 A talk connection gets `{"type":"error","message":"… is already in a call"}` when the camera is busy (SIP or another browser). Active browser calls show up in `/status` and `/calls` with `"direction": "web"`, and `POST /calls/{id}/hangup` ends them.
+
+### Sounds
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/sounds` | `[{"id","name","duration","created","used_by":[...]}]` |
+| POST | `/sounds?name=<name>` | body: a PCM **WAV** file (`Content-Type: audio/wav`, any rate/channels, max 120 s). It is converted to 8 kHz mono. The web UI converts other formats in the browser first |
+| GET | `/sounds/{id}.wav` | the stored 8 kHz WAV |
+| PUT | `/sounds/{id}` | `{"name": "…"}`: rename |
+| DELETE | `/sounds/{id}` | delete (`409` while a camera notice or bridge prompt uses it) |
+
+`/ivr/preview` also accepts `{"sound": "<id>"}` or `{"text": "…"}` for a single prompt, and uploaded sounds in `ivr_greeting_sound` / `ivr_options[].sound`.
+
+```bash
+curl -X POST "http://cam2sip:8090/api/sounds?name=Door%20chime" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: audio/wav" --data-binary @chime.wav
+```
 
 ### Settings
 

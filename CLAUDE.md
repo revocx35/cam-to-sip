@@ -44,6 +44,7 @@ Local test-environment details (PBX, camera, credentials, where it's deployed) l
 - `cam2sip/media/`: `g711.py` (tables), `rtp.py` (RTP socket, `Pacer` jitter buffer), `rtsp.py` (mic client + talk server for go2rtc).
 - `cam2sip/engine.py`: `Engine` (config → go2rtc streams + SIP accounts, call routing), `CameraLink` (camera side of any call: mic, speaker, gate, keep-alive) and `BridgeSession` (SIP call ↔ CameraLink, plus the IVR menu phases: menu ↔ connected).
 - `cam2sip/media/tts.py` (espeak-ng prompts) and `media/dtmf.py` (in-band Goertzel detector) serve the IVR.
+- `cam2sip/sounds.py`: uploaded sounds (`SoundLibrary`). `Engine.prompt_pcm()` picks the uploaded sound or TTS for any prompt; `CameraLink` plays the camera's privacy call notice (`start_notice()`, `mic_open`).
 - `cam2sip/webcall.py`: `WebCall` (browser call over `WS /api/cameras/{id}/talk` ↔ CameraLink). The video WS proxy lives in `web/app.py`.
 - `cam2sip/web/`: FastAPI app plus a no-build vanilla-JS SPA in `static/`.
 - `cam2sip/models.py` / `store.py`: pydantic config persisted to `/data/config.json`.
@@ -80,6 +81,8 @@ Local test-environment details (PBX, camera, credentials, where it's deployed) l
 - `espeak-ng --stdout` writes a WAV header with bogus sizes. `tts._parse_wav` reads the `data` chunk to EOF instead of trusting `wave`.
 - IVR prompts must win over camera audio on the same 20 ms clock (`BridgeSession._to_phone`). Barge-in means `_on_dtmf` in the menu phase calls `_stop_prompt()`, and a digit queued during an announcement skips the next menu replay (`test_ivr.py` covers this).
 - **Testing live without disturbing production:** run a local instance whose virtual phone points at a dead PBX (e.g. `127.0.0.1:9`), so it never registers the real extension (FreePBX `max_contacts=1` would steal the registration). Then INVITE it directly with `tools/sip_test_call.py --server <this host> --port 5062 --target <contact_user>@<host>:5062`. Inbound INVITEs are routed by the phone's `contact_user`.
+- Call notice invariant: while `CameraLink.notice_state` is `pending` or `playing`, camera mic audio is dropped (`_mic_audio`) and far-end audio is not sent to the speaker (`speak`). Owners must call `start_notice()` only when the call is connected. `tests/test_sounds_notice.py` fakes go2rtc by pulling the talk stream with `RtspAudioClient`, which is a handy pattern for speaker-path tests.
+- Sound uploads: the browser converts to 8 kHz WAV (`audioFileToWav` in app.js). The server only parses PCM WAV (stdlib `wave`), so there's no ffmpeg in the image. Upload bodies are raw WAV (no multipart and no python-multipart dependency).
 - Client-transaction lingering uses `loop.call_later`, not sleeping tasks. Sleeping tasks made every test take 32 s and slowed shutdown.
 
 ## Release

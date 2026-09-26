@@ -30,6 +30,12 @@ class Camera(BaseModel):
     listen_url: str = ""            # custom: any go2rtc source for the microphone
     talk_url: str = ""              # custom: any go2rtc source with a backchannel
     mic_with_video: bool = True     # request video with audio (Tapo only sends audio then)
+    # privacy: announce on the camera speaker when a call starts (mic muted until done)
+    notify_enabled: bool = False
+    notify_text: str = "Attention please. A call has started on this camera."
+    notify_sound: str = ""          # uploaded sound id; overrides notify_text
+    notify_voice: str = "en-us"
+    notify_speed: int = Field(default=150, ge=80, le=300)
 
     @field_validator("name")
     @classmethod
@@ -100,10 +106,18 @@ class DtmfAction(BaseModel):
     hangup: bool = False
 
 
+class Sound(BaseModel):
+    id: str
+    name: str
+    duration: float
+    created: float = 0.0
+
+
 class IvrOption(BaseModel):
     digit: str = Field(pattern=r"^[0-9]$")
     camera_id: str
     label: str = ""                 # spoken name; defaults to the camera name
+    sound: str = ""                 # uploaded sound replacing this option's spoken line
 
 
 DIGITS = "0123456789*#"
@@ -129,6 +143,12 @@ class Bridge(BaseModel):
     ivr_timeout: float = Field(default=8.0, ge=2, le=60)  # wait after the menu before repeating
     ivr_repeats: int = Field(default=3, ge=1, le=10)
     menu_digit: str = "*"           # IVR: during a camera call, go back to the menu
+    # uploaded sounds replacing the spoken texts above ("" = text-to-speech)
+    ivr_greeting_sound: str = ""
+    ivr_invalid_sound: str = ""
+    ivr_busy_sound: str = ""
+    ivr_connect_sound: str = ""
+    ivr_goodbye_sound: str = ""
     answer_delay: float = Field(default=0.0, ge=0, le=60)
     mic_gain_db: float = Field(default=0.0, ge=-20, le=30)       # camera -> phone
     speaker_gain_db: float = Field(default=0.0, ge=-20, le=30)   # phone -> camera
@@ -155,6 +175,13 @@ class Bridge(BaseModel):
                 raise ValueError(f"invalid DTMF digit {d!r}")
         return self
 
+    def sound_ids(self) -> set[str]:
+        ids = {self.ivr_greeting_sound, self.ivr_invalid_sound, self.ivr_busy_sound,
+               self.ivr_connect_sound, self.ivr_goodbye_sound}
+        ids.update(o.sound for o in self.ivr_options)
+        ids.discard("")
+        return ids
+
     def camera_ids(self) -> list[str]:
         if self.mode == "ivr":
             return [o.camera_id for o in self.ivr_options]
@@ -172,6 +199,7 @@ class Config(BaseModel):
     cameras: list[Camera] = Field(default_factory=list)
     phones: list[Phone] = Field(default_factory=list)
     bridges: list[Bridge] = Field(default_factory=list)
+    sounds: list[Sound] = Field(default_factory=list)
     settings: Settings = Field(default_factory=Settings)
 
 

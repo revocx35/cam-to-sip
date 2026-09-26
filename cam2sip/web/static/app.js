@@ -87,11 +87,86 @@ function phoneBadge(st) {
 }
 
 /* ---------- state ---------- */
-const state = { cameras: [], phones: [], bridges: [], status: null, probes: {} };
+const state = { cameras: [], phones: [], bridges: [], sounds: [], status: null, probes: {} };
 async function loadAll() {
-  const [cameras, phones, bridges, status] = await Promise.all([
-    api('GET', '/cameras'), api('GET', '/phones'), api('GET', '/bridges'), api('GET', '/status')]);
-  Object.assign(state, { cameras, phones, bridges, status });
+  const [cameras, phones, bridges, status, sounds] = await Promise.all([
+    api('GET', '/cameras'), api('GET', '/phones'), api('GET', '/bridges'), api('GET', '/status'), api('GET', '/sounds')]);
+  Object.assign(state, { cameras, phones, bridges, status, sounds });
+}
+
+/* ---------- sounds (uploaded audio for prompts) ---------- */
+function soundOptions(selected) {
+  return '<option value="">Text-to-speech</option>' + state.sounds.map(x =>
+    `<option value="${esc(x.id)}" ${x.id === selected ? 'selected' : ''}>🔊 ${esc(x.name)} (${x.duration.toFixed(1)} s)</option>`).join('');
+}
+
+// Decode any audio the browser understands, resample to 8 kHz mono, return a 16-bit WAV blob.
+async function audioFileToWav(file) {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const ctx = new AC();
+  let decoded;
+  try { decoded = await ctx.decodeAudioData(await file.arrayBuffer()); }
+  catch { throw new Error(`Your browser can't decode "${file.name}"`); }
+  finally { ctx.close().catch(() => {}); }
+  if (decoded.duration > 120) throw new Error('Sounds can be at most 120 seconds long');
+  const off = new OfflineAudioContext(1, Math.max(1, Math.ceil(decoded.duration * 8000)), 8000);
+  const src = off.createBufferSource();
+  src.buffer = decoded;
+  src.connect(off.destination);
+  src.start();
+  const pcm = (await off.startRendering()).getChannelData(0);
+  const view = new DataView(new ArrayBuffer(44 + pcm.length * 2));
+  const str = (o, t) => { for (let i = 0; i < t.length; i++) view.setUint8(o + i, t.charCodeAt(i)); };
+  str(0, 'RIFF'); view.setUint32(4, 36 + pcm.length * 2, true); str(8, 'WAVE'); str(12, 'fmt ');
+  view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+  view.setUint32(24, 8000, true); view.setUint32(28, 16000, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  str(36, 'data'); view.setUint32(40, pcm.length * 2, true);
+  for (let i = 0; i < pcm.length; i++) view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, pcm[i])) * 32767, true);
+  return new Blob([view.buffer], { type: 'audio/wav' });
+}
+
+// Let the user pick a file, upload it and return the new sound (or null if cancelled).
+function uploadSound() {
+  return new Promise((resolve, reject) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'audio/*,.wav,.mp3,.ogg,.oga,.m4a,.aac,.flac,.opus,.webm';
+    input.onchange = async () => {
+      const file = input.files[0];
+      if (!file) return resolve(null);
+      try {
+        const wav = await audioFileToWav(file);
+        const name = file.name.replace(/\.[^.]+$/, '');
+        const r = await fetch(`/api/sounds?name=${encodeURIComponent(name)}`, { method: 'POST', headers: { 'Content-Type': 'audio/wav' }, body: wav });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+        state.sounds = await api('GET', '/sounds');
+        toast(`Uploaded "${data.name}" (${data.duration.toFixed(1)} s)`, 'ok');
+        resolve(data);
+      } catch (e) { reject(e); }
+    };
+    input.click();
+  });
+}
+
+// A text field with a "text-to-speech or uploaded sound" selector next to it.
+function promptField(label, textName, text, soundName, sound, hint = '') {
+  return `<label>${label}${hint ? ` <span class="hint">${hint}</span>` : ''}
+    <div class="prompt-field"><input name="${textName}" value="${esc(text)}">
+      <select name="${soundName}" data-sound aria-label="${esc(label)} source">${soundOptions(sound)}</select></div></label>`;
+}
+
+function bindSoundSelects(form) {
+  const sync = sel => {
+    const input = sel.parentElement.querySelector('input');
+    if (input) { input.readOnly = !!sel.value; input.classList.toggle('replaced', !!sel.value); }
+  };
+  $$('select[data-sound]', form).forEach(sel => { sel.onchange = () => sync(sel); sync(sel); });
+}
+
+function refreshSoundSelects(form) {
+  $$('select[data-sound]', form).forEach(sel => { const v = sel.value; sel.innerHTML = soundOptions(v); });
+  bindSoundSelects(form);
 }
 const camById = id => state.cameras.find(c => c.id === id);
 const phoneById = id => state.phones.find(p => p.id === id);
@@ -139,7 +214,8 @@ function callCard(c) {
       <dt>Camera</dt><dd>${esc(c.camera || '-')}</dd>
       <dt>Codec</dt><dd>${esc(c.codec || '-')}</dd>
       ${m.phase === 'menu' ? `<dt>IVR</dt><dd>${badge('caller is in the menu', 'info')}</dd>` : ''}
-      <dt>Camera mic</dt><dd>${m.phase === 'menu' ? badge('-', '', true) : mic.connected ? badge(`live ${mic.codec || ''} · buffer ${mic.buffer_ms}ms`, 'ok') : badge(mic.error || 'connecting', mic.error ? 'bad' : 'warn')}</dd>
+      ${m.notice === 'pending' || m.notice === 'playing' ? `<dt>Call notice</dt><dd>${badge(m.notice === 'playing' ? 'announcing on camera' : 'waiting for speaker', 'warn')}</dd>` : ''}
+      <dt>Camera mic</dt><dd>${m.phase === 'menu' ? badge('-', '', true) : mic.muted ? badge('muted until notice ends', 'warn') : mic.connected ? badge(`live ${mic.codec || ''} · buffer ${mic.buffer_ms}ms`, 'ok') : badge(mic.error || 'connecting', mic.error ? 'bad' : 'warn')}</dd>
       <dt>Camera speaker</dt><dd>${spk.state === 'connected' ? badge(spk.gate_open ? 'talking' : 'connected', spk.gate_open ? 'info' : 'ok') : badge(spk.state || 'n/a', spk.state === 'error' ? 'bad' : '')}</dd>
       <dt>${c.direction === 'web' ? 'Frames' : 'RTP'}</dt><dd class="mono">${c.rtp.rx_packets} in / ${c.rtp.tx_packets} out ${c.rtp.remote ? '· ' + esc(c.rtp.remote) : ''}</dd>
     </dl>
@@ -217,6 +293,7 @@ function camCaps(c) {
   const out = [badge(c.kind.toUpperCase(), 'info', true)];
   if (!c.enabled) out.push(badge('disabled'));
   if (c.busy) out.push(badge('in call', 'info'));
+  if (c.notify_enabled) out.push(badge('call notice', 'info'));
   if (p) {
     out.push(p.mic ? badge(`mic ${p.mic}`, 'ok') : badge('no mic', 'bad'));
     out.push(p.speaker ? badge(`speaker ${p.speaker}`, 'ok') : badge('no speaker', 'warn'));
@@ -227,7 +304,7 @@ function camCaps(c) {
 }
 
 pages.cameras = async () => {
-  state.cameras = await api('GET', '/cameras');
+  [state.cameras, state.sounds] = await Promise.all([api('GET', '/cameras'), api('GET', '/sounds')]);
   const cams = state.cameras;
   main().innerHTML = `
     <div class="page-head"><div><h1>Cameras</h1><p class="muted">Audio sources and speakers, via go2rtc.</p></div>
@@ -325,6 +402,21 @@ function cameraForm(cam) {
         <label>Microphone source<input name="listen_url" value="${esc(c.listen_url)}" placeholder="rtsp://user:pass@192.168.1.50:554/stream"></label>
         <label>Speaker (backchannel) source<input name="talk_url" value="${esc(c.talk_url)}" placeholder="rtsp://user:pass@192.168.1.50:554/stream"></label>
       </div>
+      <fieldset><legend>Call notice (privacy)</legend>
+        <label class="check"><input type="checkbox" name="notify_enabled" ${c.notify_enabled ? 'checked' : ''}> Announce on the camera speaker when a call starts</label>
+        <p class="hint muted small" style="margin:-4px 0 10px">Plays before any audio is shared. The camera microphone stays muted until it has finished, and the caller hears it too. Needs the camera speaker.</p>
+        ${promptField('Announcement', 'notify_text', c.notify_text ?? 'Attention please. A call has started on this camera.', 'notify_sound', c.notify_sound || '')}
+        <div class="row">
+          <label>Voice / language<input name="notify_voice" list="cam-voice-list" value="${esc(c.notify_voice || 'en-us')}"><datalist id="cam-voice-list"></datalist></label>
+          <label>Speed (words per minute)<input name="notify_speed" type="number" min="80" max="300" step="5" value="${esc(c.notify_speed || 150)}"></label>
+        </div>
+        <div class="toolbar" style="margin-bottom:12px">
+          <button type="button" class="btn small" id="notice-upload">⬆ Upload sound…</button>
+          <button type="button" class="btn small" id="notice-preview">▶ Preview</button>
+          ${cam ? '<button type="button" class="btn small" id="notice-camera">Play on camera</button>' : ''}
+          <audio id="notice-audio" controls class="hidden" style="height:32px;flex:1;min-width:180px"></audio>
+        </div>
+      </fieldset>
       <label class="check"><input type="checkbox" name="mic_with_video" ${c.mic_with_video ? 'checked' : ''}> Request video together with audio <span class="hint">(needed for Tapo, which only streams audio while video is playing)</span></label>
       <label class="check"><input type="checkbox" name="enabled" ${c.enabled ? 'checked' : ''}> Enabled</label>
       <div id="probe-result"></div>
@@ -346,6 +438,33 @@ function cameraForm(cam) {
     };
     sync();
     const payload = () => Object.assign(readForm(form), cam ? { id: cam.id } : {});
+    bindSoundSelects(form);
+    api('GET', '/ivr/voices').then(v => {
+      $('#cam-voice-list', form).innerHTML = v.voices.map(o => `<option value="${esc(o.id)}">${esc(o.name)}</option>`).join('');
+    }).catch(() => {});
+    const noticeBody = () => {
+      const f = readForm(form);
+      return { notify_text: f.notify_text, notify_sound: form.notify_sound.value, notify_voice: f.notify_voice, notify_speed: f.notify_speed || 150 };
+    };
+    $('#notice-upload', form).onclick = e => busy(e.target, async () => {
+      const snd = await uploadSound();
+      if (!snd) return;
+      refreshSoundSelects(form);
+      form.notify_sound.value = snd.id;
+      bindSoundSelects(form);
+    });
+    $('#notice-preview', form).onclick = e => busy(e.target, async () => {
+      const n = noticeBody();
+      const blob = await api('POST', '/ivr/preview', { text: n.notify_text, sound: n.notify_sound, ivr_voice: n.notify_voice, ivr_speed: n.notify_speed });
+      const audio = $('#notice-audio', form);
+      audio.src = URL.createObjectURL(blob);
+      audio.classList.remove('hidden');
+      audio.play().catch(() => {});
+    });
+    if ($('#notice-camera', form)) $('#notice-camera', form).onclick = e => busy(e.target, async () => {
+      const r = await api('POST', `/cameras/${cam.id}/test-notice`, noticeBody());
+      toast(`Notice played on the camera (${r.packets} packets)`, 'ok');
+    });
     $('#discover', form).onclick = e => busy(e.target, async () => {
       const f = readForm(form);
       const r = await api('POST', '/cameras/onvif-discover', { host: f.host, port: f.onvif_port || 80, username: f.username, password: f.password, id: cam?.id });
@@ -530,6 +649,7 @@ function ivrRow(o = {}) {
     <select data-f="digit" aria-label="Digit">${'1234567890'.split('').map(d => `<option ${d === used ? 'selected' : ''}>${d}</option>`).join('')}</select>
     <select data-f="camera_id" aria-label="Camera">${state.cameras.map(c => `<option value="${esc(c.id)}" ${c.id === o.camera_id ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}</select>
     <input data-f="label" placeholder="spoken name (default: camera name)" value="${esc(o.label)}">
+    <select data-f="sound" data-sound aria-label="Sound for this option" title="Replace this option's spoken line with an uploaded sound">${soundOptions(o.sound || '')}</select>
     <button type="button" class="icon-btn" data-rm aria-label="Remove">&times;</button>
   </div>`;
 }
@@ -540,10 +660,12 @@ const BRIDGE_DEFAULTS = {
   ivr_greeting: 'Hello.', ivr_option_text: 'Press {digit} for {name}.', ivr_invalid_text: 'Sorry, that is not a valid choice.',
   ivr_busy_text: '{name} is busy right now.', ivr_connect_text: 'Connecting to {name}.', ivr_goodbye_text: 'Goodbye.',
   ivr_voice: 'en-us', ivr_speed: 150, ivr_timeout: 8, ivr_repeats: 3, menu_digit: '*',
+  ivr_greeting_sound: '', ivr_invalid_sound: '', ivr_busy_sound: '', ivr_connect_sound: '', ivr_goodbye_sound: '',
 };
 
 function bridgeForm(b) {
   const x = Object.assign({}, BRIDGE_DEFAULTS, b || {});
+  x.ivr_options = (x.ivr_options || []).map(o => Object.assign({ sound: '' }, o));
   const usedPhones = new Set(state.bridges.filter(o => o.id !== b?.id).map(o => o.phone_id));
   const opts = x.ivr_options.length ? x.ivr_options : state.cameras.slice(0, 2).map((c, i) => ({ digit: String(i + 1), camera_id: c.id }));
   openModal(b ? 'Edit bridge' : 'New bridge', `
@@ -569,20 +691,20 @@ function bridgeForm(b) {
             <input name="ivr_voice" list="voice-list" value="${esc(x.ivr_voice)}"><datalist id="voice-list"></datalist></label>
           <label>Speed (words per minute)<input name="ivr_speed" type="number" min="80" max="300" step="5" value="${esc(x.ivr_speed)}"></label>
         </div>
-        <label>Greeting<input name="ivr_greeting" value="${esc(x.ivr_greeting)}" placeholder="Welcome to the front door intercom."></label>
-        <label>Each option <span class="hint">{digit} and {name} are filled in</span><input name="ivr_option_text" value="${esc(x.ivr_option_text)}"></label>
+        ${promptField('Greeting', 'ivr_greeting', x.ivr_greeting, 'ivr_greeting_sound', x.ivr_greeting_sound)}
+        <label>Each option <span class="hint">{digit} and {name} are filled in; or pick a sound per option above</span><input name="ivr_option_text" value="${esc(x.ivr_option_text)}"></label>
         <details class="more"><summary>More prompts and timing</summary>
-          <label>Invalid choice<input name="ivr_invalid_text" value="${esc(x.ivr_invalid_text)}"></label>
-          <label>Camera busy <span class="hint">{name}</span><input name="ivr_busy_text" value="${esc(x.ivr_busy_text)}"></label>
-          <label>Connecting <span class="hint">{name}; empty = silent</span><input name="ivr_connect_text" value="${esc(x.ivr_connect_text)}"></label>
-          <label>No choice made (before hanging up)<input name="ivr_goodbye_text" value="${esc(x.ivr_goodbye_text)}"></label>
+          ${promptField('Invalid choice', 'ivr_invalid_text', x.ivr_invalid_text, 'ivr_invalid_sound', x.ivr_invalid_sound)}
+          ${promptField('Camera busy', 'ivr_busy_text', x.ivr_busy_text, 'ivr_busy_sound', x.ivr_busy_sound, '{name}')}
+          ${promptField('Connecting', 'ivr_connect_text', x.ivr_connect_text, 'ivr_connect_sound', x.ivr_connect_sound, '{name}; empty = silent')}
+          ${promptField('No choice made (before hanging up)', 'ivr_goodbye_text', x.ivr_goodbye_text, 'ivr_goodbye_sound', x.ivr_goodbye_sound)}
           <div class="row three">
             <label>Back-to-menu digit<input name="menu_digit" maxlength="1" value="${esc(x.menu_digit)}"></label>
             <label>Wait after menu (s)<input name="ivr_timeout" type="number" min="2" max="60" value="${esc(x.ivr_timeout)}"></label>
             <label>Repeat menu (times)<input name="ivr_repeats" type="number" min="1" max="10" value="${esc(x.ivr_repeats)}"></label>
           </div>
         </details>
-        <div class="toolbar" style="margin:4px 0 12px"><button type="button" class="btn small" id="ivr-preview">▶ Preview menu</button><audio id="ivr-audio" controls class="hidden" style="height:32px;flex:1;min-width:200px"></audio></div>
+        <div class="toolbar" style="margin:4px 0 12px"><button type="button" class="btn small" id="ivr-upload">⬆ Upload sound…</button><button type="button" class="btn small" id="ivr-preview">▶ Preview menu</button><audio id="ivr-audio" controls class="hidden" style="height:32px;flex:1;min-width:200px"></audio></div>
       </fieldset>
       <fieldset><legend>Answering</legend>
         <div class="row">
@@ -623,11 +745,18 @@ function bridgeForm(b) {
       const digit = '1234567890'.split('').find(d => !taken.has(d)) || '0';
       $('#ivr-list', form).insertAdjacentHTML('beforeend', ivrRow({ digit, camera_id: state.cameras[0]?.id }));
       bindRm();
+      bindSoundSelects(form);
     };
     bindRm();
     const ivrOptions = () => $$('.ivr-row', form).map(r => ({
-      digit: $('[data-f=digit]', r).value, camera_id: $('[data-f=camera_id]', r).value, label: $('[data-f=label]', r).value.trim(),
+      digit: $('[data-f=digit]', r).value, camera_id: $('[data-f=camera_id]', r).value,
+      label: $('[data-f=label]', r).value.trim(), sound: $('[data-f=sound]', r).value,
     }));
+    bindSoundSelects(form);
+    $('#ivr-upload', form).onclick = e => busy(e.target, async () => {
+      const snd = await uploadSound();
+      if (snd) refreshSoundSelects(form);
+    });
     api('GET', '/ivr/voices').then(v => {
       $('#voice-list', form).innerHTML = v.voices.map(o => `<option value="${esc(o.id)}">${esc(o.name)}</option>`).join('');
       if (!v.available) $('#voice-hint', form).textContent = 'text-to-speech unavailable: beeps are played';
@@ -635,8 +764,8 @@ function bridgeForm(b) {
     $('#ivr-preview', form).onclick = e => busy(e.target, async () => {
       const f = readForm(form);
       const blob = await api('POST', '/ivr/preview', {
-        ivr_options: ivrOptions(), ivr_greeting: f.ivr_greeting, ivr_option_text: f.ivr_option_text,
-        ivr_voice: f.ivr_voice, ivr_speed: f.ivr_speed || 150,
+        ivr_options: ivrOptions(), ivr_greeting: f.ivr_greeting, ivr_greeting_sound: form.ivr_greeting_sound.value,
+        ivr_option_text: f.ivr_option_text, ivr_voice: f.ivr_voice, ivr_speed: f.ivr_speed || 150,
       });
       const audio = $('#ivr-audio', form);
       audio.src = URL.createObjectURL(blob);
@@ -789,7 +918,8 @@ pages.call = async id => {
       const mic = m.mic || {}, spk = m.speaker || {};
       $('#call-stats').innerHTML = `
         ${m.phase === 'menu' ? `<dt>IVR</dt><dd>${badge('caller is in the menu', 'info')}</dd>` : ''}
-      <dt>Camera mic</dt><dd>${m.phase === 'menu' ? badge('-', '', true) : mic.connected ? badge(`live ${mic.codec || ''}`, 'ok') : badge(mic.error || 'connecting', mic.error ? 'bad' : 'warn')}</dd>
+      ${m.notice === 'pending' || m.notice === 'playing' ? `<dt>Call notice</dt><dd>${badge(m.notice === 'playing' ? 'announcing on camera' : 'waiting for speaker', 'warn')}</dd>` : ''}
+      <dt>Camera mic</dt><dd>${m.phase === 'menu' ? badge('-', '', true) : mic.muted ? badge('muted until notice ends', 'warn') : mic.connected ? badge(`live ${mic.codec || ''}`, 'ok') : badge(mic.error || 'connecting', mic.error ? 'bad' : 'warn')}</dd>
         <dt>Camera speaker</dt><dd>${spk.state === 'connected' ? badge(spk.gate_open ? 'talking' : 'connected', spk.gate_open ? 'info' : 'ok') : badge(spk.state === 'none' ? 'not available' : spk.state, spk.state === 'error' ? 'bad' : '')}</dd>`;
       if (spk.state === 'none') { ptt.disabled = openMic.disabled = true; ptt.querySelector('.ptt-label').textContent = 'No speaker'; }
     },
@@ -876,6 +1006,10 @@ pages.settings = async () => {
           <div class="form-actions"><button class="btn primary" type="submit">Change password</button></div>
         </form></div>
     </div>
+    <div class="card section"><div class="card-row"><h2>Sounds</h2><button class="btn small" id="sound-upload">⬆ Upload sound…</button></div>
+      <p class="muted" style="margin-top:4px">Uploaded audio for IVR prompts and camera call notices. Any format your browser can play (MP3, WAV, OGG, M4A…); converted to 8 kHz telephone audio, max 120 s.</p>
+      <div id="sound-list"></div>
+    </div>
     <div class="card section"><h2>Automation API</h2>
       <p class="muted">Use this token to trigger calls from Home Assistant, Frigate, Node-RED, etc.
         Full API reference: <a href="/api/docs" target="_blank">/api/docs</a>.</p>
@@ -887,6 +1021,28 @@ pages.settings = async () => {
   -H "Content-Type: application/json" -d '{"target": "1001"}'</pre>
       <p class="muted small">Bridge ids: ${state.bridges.length ? state.bridges.map(b => `<code>${esc(b.id)}</code> (${esc(b.name || '')})`).join(', ') : 'create a bridge first'}.</p>
     </div>`;
+  const drawSounds = () => {
+    $('#sound-list').innerHTML = state.sounds.length ? `<div class="table-wrap"><table>
+      <tr><th>Name</th><th>Length</th><th>Used by</th><th>Listen</th><th></th></tr>
+      ${state.sounds.map(x => `<tr data-sound-id="${esc(x.id)}"><td>${esc(x.name)}</td><td>${x.duration.toFixed(1)} s</td>
+        <td class="small">${x.used_by.length ? esc(x.used_by.join(', ')) : '<span class="muted">unused</span>'}</td>
+        <td><audio controls preload="none" src="/api/sounds/${esc(x.id)}.wav" style="height:30px;max-width:220px"></audio></td>
+        <td><button class="btn small" data-sact="rename">Rename</button> <button class="btn small danger" data-sact="delete">Delete</button></td></tr>`).join('')}
+    </table></div>` : '<p class="muted">No sounds uploaded yet.</p>';
+    $$('[data-sact]').forEach(btn => btn.onclick = () => {
+      const id = btn.closest('tr').dataset.soundId;
+      const snd = state.sounds.find(x => x.id === id);
+      if (btn.dataset.sact === 'rename') {
+        const name = prompt('New name', snd.name);
+        if (name) busy(btn, async () => { await api('PUT', `/sounds/${id}`, { name }); state.sounds = await api('GET', '/sounds'); drawSounds(); });
+      } else if (confirm(`Delete sound "${snd.name}"?`)) {
+        busy(btn, async () => { await api('DELETE', `/sounds/${id}`); state.sounds = await api('GET', '/sounds'); drawSounds(); toast('Sound deleted'); });
+      }
+    });
+  };
+  state.sounds = await api('GET', '/sounds');
+  drawSounds();
+  $('#sound-upload').onclick = e => busy(e.target, async () => { if (await uploadSound()) drawSounds(); });
   $('#copy-token').onclick = () => { navigator.clipboard?.writeText($('#token').value); toast('Copied'); };
   $('#regen-token').onclick = e => {
     if (!confirm('Regenerate the API token? Existing integrations will stop working.')) return;
