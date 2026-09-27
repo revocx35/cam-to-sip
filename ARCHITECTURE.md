@@ -80,14 +80,15 @@ cam2sip/
     piper.py         PiperEngine: Piper HTTP server process, voice catalog, voice downloads
     dtmf.py          Goertzel in-band DTMF detector (fallback when telephone-event isn't negotiated)
   web/
-    app.py           FastAPI app: auth middleware, REST API, static UI
-    auth.py          scrypt password hash, HMAC-signed session cookie
+    app.py           FastAPI app: proxy headers, auth + cross-site middleware, REST API, static UI
+    auth.py          scrypt password hash, HMAC-signed session cookie, LoginThrottle
     tls.py           self-signed certificate for the HTTPS listener (openssl)
     static/          single-page UI (vanilla JS, no build step)
       app.js         pages, router, forms
       call.js        CameraCall: browser audio (A-law over WebSocket) + MSE video
       mic-worklet.js AudioWorklet: mic -> 8 kHz frames (low-pass + resample)
-tests/               pytest: SIP parsing/auth, SDP, G.711, pacer, SIP loopback calls, web API
+tests/               pytest: SIP parsing/auth, SDP, G.711, pacer, SIP loopback calls, web API,
+                     login security (throttle, trusted proxies, cross-site, cookie flags)
 tools/sip_test_call.py      live end-to-end SIP call tester (through a real PBX)
 tools/browser_call_test.py  headless Firefox smoke test of a browser call
 ```
@@ -333,14 +334,31 @@ The PBX handles transcoding and security at the edge.
 ## 7. Web UI & API
 
 - FastAPI serves `/api/*` and the static SPA (`/`, `/static/*`). Interactive docs are at `/api/docs` (login required).
-- uvicorn's own proxy-header handling is off. The app wraps itself in `ProxyHeadersMiddleware` with `CAM2SIP_TRUSTED_PROXIES`, so only those peers can set `X-Forwarded-For`/`-Proto`, and the client IP is the right-most untrusted `X-Forwarded-For` entry.
-- Every `/api/*` request and WebSocket that a browser marks as started by another site (`Sec-Fetch-Site` other than `same-origin`/`none`, except navigations) is refused. That covers what `SameSite=strict` doesn't: sibling subdomains and `/api/setup`.
-- Password checks go through `auth.LoginThrottle` (per IP + whole account, charged before scrypt, refunded on success) and run scrypt in a worker thread, so a login flood can't stall call audio.
-- Auth middleware protects every `/api/*` route except `health`, `session`, `login`, `logout` and `setup`. It accepts either:
-  - an HMAC-signed session cookie bound to the password hash, so changing the password logs out old sessions, or
-  - `Authorization: Bearer <api_token>`.
 - Secrets (`password`, `cloud_password`) are write-only. The API returns `""` plus `<field>_set: true`, and an empty value on update keeps the stored one.
 - The UI polls `/api/status` every 2–3 s and `/api/logs?after=<seq>` every 1.5 s on the logs page. It needs no WebSockets, so it works behind any proxy.
+
+### Authentication and request path
+
+```
+browser / automation ──► [reverse proxy, e.g. Nginx Proxy Manager] ──► uvicorn :8090 / :8443 (proxy_headers off)
+  └► ProxyHeadersMiddleware   X-Forwarded-For/-Proto only from CAM2SIP_TRUSTED_PROXIES → client IP, scheme
+     └► require_auth          /api/*: cross-site refusal (403), then cookie or bearer token (401)
+        └► route              /api/login, /api/settings/password: LoginThrottle → scrypt in a worker thread
+WebSockets skip the HTTP middleware: /api/cameras/{id}/talk and /video call ws_authed() (cross-site + cookie).
+```
+
+- **Who is authenticated.** Every `/api/*` route except `health`, `session`, `login`, `logout` and `setup` needs either:
+  - the session cookie: `<exp>.<HMAC(session_secret, "<exp>:<password hash>")>`, 7 days, `HttpOnly`, `SameSite=strict`. Binding the password hash means a password change logs out every session. Sessions are stateless, so logout only clears the cookie in that browser;
+  - or `Authorization: Bearer <api_token>` (192-bit random, regenerable in Settings), for automations.
+- **Client IP and scheme.** uvicorn's own proxy-header handling is off on both listeners. The app wraps itself in uvicorn's `ProxyHeadersMiddleware` with `CAM2SIP_TRUSTED_PROXIES` (default `private`: loopback + RFC 1918 + ULA). Only those peers can set `X-Forwarded-For`/`-Proto`, and the client IP is the right-most `X-Forwarded-For` entry that isn't a trusted proxy. Nginx Proxy Manager appends the real client IP to whatever the client sent, so a spoofed entry lands to the left of it and is ignored. `*` is refused at startup.
+- **Cross-site requests.** Every `/api/*` request and WebSocket that a browser marks as started by another site (`Sec-Fetch-Site` other than `same-origin`/`none`) is refused; plain navigations (`GET` + `Sec-Fetch-Mode: navigate`) are allowed. `SameSite=strict` alone doesn't cover sibling subdomains (same site) or `/api/setup`, which needs no cookie. WebSockets aren't bound by CORS at all. For JSON routes the check also doesn't depend on the FastAPI version: before FastAPI's strict `Content-Type` default, a body without `Content-Type` (which a cross-site `no-cors` fetch can send) was parsed as JSON. Non-browser clients don't send `Sec-Fetch-Site` and are unaffected.
+- **Brute-force throttle** (`auth.LoginThrottle`, in memory). Each password check is charged *before* scrypt runs and refunded only on success, so parallel requests can't race past a lock:
+  - per client IP: 5 free failures, then locks of 30 s doubling up to 1 h; failures from a quiet IP are forgotten after a day;
+  - whole account: after 50 consecutive failures from all IPs, one attempt per lock period (30 s doubling up to 15 min), about a hundred guesses a day;
+  - a locked request gets `429` with `Retry-After`; the correct password is refused too while locked.
+- **Passwords.** scrypt (N=2^14, r=8, p=1) runs in `asyncio.to_thread` (password checks at most two at a time), so a login flood can't stall call audio on the event loop. New passwords need 10 characters; older, shorter ones still sign in. `/api/setup` works only until a password exists and re-checks after hashing, so two parallel setups can't both win. `CAM2SIP_ADMIN_PASSWORD` sets the first password without the UI (a short one only logs a warning).
+- **Cookie `Secure` flag** (`SECURE_COOKIES`): `true`/`false`, or `auto` (default) = only when a trusted proxy reports HTTPS (scheme `https` *and* an `X-Forwarded-Proto` header). Not for the direct :8443 listener, because browsers don't let an `http://` page overwrite a `Secure` cookie, which would break sign-in on :8090 for the same host.
+- **What an admin can do.** Custom cameras pass `listen_url`/`talk_url` to go2rtc unchanged, including sources that run programs (`exec:`). The admin password is therefore as powerful as a shell on the host, which is why it's throttled and not just checked.
 
 ## 7a. Browser calls
 
@@ -359,7 +377,7 @@ camera video ──► go2rtc MSE ──► WebSocket proxy /api/cameras/{id}/vi
   - the browser sends JSON `{"type":"gate","db":-55|null}` (open mic vs push-to-talk) and `hangup`.
 - **Video**: the app proxies go2rtc's `/api/ws?src=c2s_<id>` for that one stream and forwards only `{"type":"mse"}` requests. The browser appends fMP4 segments to a `SourceBuffer` (or `ManagedMediaSource` on Safari) and seeks to stay within ~0.2 s of live. Without MSE/H.264 it falls back to 1 fps JPEG snapshots.
 - **Secure context**: `getUserMedia` and AudioWorklets only exist on HTTPS pages (or localhost). The app therefore runs a second uvicorn listener with TLS on `HTTPS_PORT` (default 8443) inside the same process. That listener starts in the FastAPI lifespan with `lifespan="off"`, and signal handling is left to the main server. A self-signed certificate is generated in `/data/tls` unless `TLS_CERT`/`TLS_KEY` are set. On plain HTTP the call page is listen-only and links to the HTTPS URL.
-- **Auth**: FastAPI HTTP middleware doesn't run for WebSockets, so both endpoints check the session cookie themselves. The cookie is `SameSite=strict`, which blocks cross-site WebSocket hijacking.
+- **Auth**: FastAPI HTTP middleware doesn't run for WebSockets, so both endpoints call `ws_authed()`: it refuses handshakes that another site started (`Sec-Fetch-Site`, which also covers sibling subdomains that `SameSite=strict` lets through) and then checks the session cookie. Without this, a page on another subdomain could listen to the camera microphone.
 - **Echo / half duplex**: browser `echoCancellation` and `noiseSuppression` are on. Push-to-talk is the default because cameras duck their mic while the speaker plays.
 
 ## 8. Design decisions
@@ -373,6 +391,9 @@ camera video ──► go2rtc MSE ──► WebSocket proxy /api/cameras/{id}/vi
 | RTSP talk server (not publish) | go2rtc *pulls* from us straight into the camera consumer: one hop, and the call lifetime is tied to the TCP connection. |
 | Browser calls over WebSocket, not WebRTC | Same port and proxy path as the UI, go2rtc stays private, and the camera side is shared with SIP calls. The cost is TCP instead of UDP for audio, which is fine on a LAN or over a decent uplink. |
 | JSON file store | The data set is tiny and human-readable. Writes are atomic and there's nothing to migrate. |
+| Fetch Metadata (`Sec-Fetch-Site`) instead of CSRF tokens | No token plumbing in the SPA, and it also covers WebSocket handshakes and the cookie-less `/api/setup`. Automations don't send the header and keep working. |
+| Login throttle in memory | One admin account, one process: nothing worth persisting. A restart clears the locks, which is also the way out when an attacker keeps the account lock engaged. |
+| `TRUSTED_PROXIES=private` by default | Nginx Proxy Manager on the same host (Docker bridge address) or on the LAN works without configuration, and clients coming through it can't spoof their IP. Hosts on the LAN can, which matches the LAN trust model (inbound SIP isn't authenticated either). |
 
 ## 9. Known limitations / ideas
 
@@ -381,4 +402,6 @@ camera video ──► go2rtc MSE ──► WebSocket proxy /api/cameras/{id}/vi
 - Latency is roughly 150–300 ms end to end (camera chunking plus buffers). Fine for an intercom, not for music.
 - Browser calls need HTTPS for the microphone (self-signed on :8443 by default).
 - Natural voices cost image size (~300 MB for Piper/onnxruntime) and ~150-200 MB RAM per loaded voice, and need internet once per voice download.
+- Anyone who can reach the login can keep the account lock engaged (one wrong password per lock period after 50 failures), so new sign-ins wait up to 15 min at a time. Existing sessions and the API token keep working, and a restart clears it.
+- Sessions can't be revoked one by one: logout only drops the cookie in that browser, and changing the password revokes all of them.
 - Ideas: SIP over TCP/TLS, G.722 wideband, video for SIP video phones, MQTT events, recording prompts straight from the browser microphone, WebRTC for browser calls over high-latency links.

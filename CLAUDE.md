@@ -46,7 +46,7 @@ Local test-environment details (PBX, camera, credentials, where it's deployed) l
 - `cam2sip/media/tts.py` (espeak-ng prompts) and `media/dtmf.py` (in-band Goertzel detector) serve the IVR.
 - `cam2sip/sounds.py`: uploaded sounds (`SoundLibrary`). `Engine.prompt_pcm()` picks the uploaded sound or TTS for any prompt; `CameraLink` plays the camera's privacy call notice (`start_notice()`, `mic_open`).
 - `cam2sip/webcall.py`: `WebCall` (browser call over `WS /api/cameras/{id}/talk` ↔ CameraLink). The video WS proxy lives in `web/app.py`.
-- `cam2sip/web/`: FastAPI app plus a no-build vanilla-JS SPA in `static/`.
+- `cam2sip/web/`: FastAPI app (`app.py`: proxy-header and auth middleware, routes), `auth.py` (scrypt, session cookie, `LoginThrottle`) plus a no-build vanilla-JS SPA in `static/`. ARCHITECTURE.md §7 has the request path and the reasoning.
 - `cam2sip/models.py` / `store.py`: pydantic config persisted to `/data/config.json`.
 - `tests/`: pytest (asyncio mode auto). `tests/test_sip_loopback.py` runs real SIP calls between two in-process UAs.
 - `docs/`: user docs (FreePBX, cameras, API, troubleshooting).
@@ -59,8 +59,13 @@ Local test-environment details (PBX, camera, credentials, where it's deployed) l
 - Secrets (`password`, `cloud_password`) are write-only in the API: return `""` + `<field>_set`, and keep the stored value when an update sends `""`. `web/app.py:merge()` does this.
 - go2rtc stream names are `c2s_<camera id>` (mic) and `c2s_<camera id>_talk` (speaker). cam2sip owns every `c2s_*` stream and deletes unknown ones.
 - UI: escape all user data with `esc()` in `app.js`. No frameworks and no build step.
-- When you change env vars, API endpoints or behaviour, update `README.md`, the `docs/` pages and `.env.example`.
-- Add or adjust tests for SIP/media changes. The loopback tests catch most dialog bugs quickly.
+- Web security (the UI may be exposed through a reverse proxy):
+  - Every `/api/*` HTTP route gets the cross-site check and auth from `require_auth`. Add a route to `PUBLIC` only if it must work signed out.
+  - WebSocket routes skip the HTTP middleware: call `ws_authed()` right after `accept()`.
+  - Anything that checks the admin password goes through `charge_attempt()` → `password_ok()` → `throttle.success()` (only after everything succeeded). Never compare passwords on the event loop.
+  - Use `client_ip(request)` for the client address; don't read `X-Forwarded-For` yourself.
+- When you change env vars, API endpoints or behaviour, update `README.md`, the `docs/` pages, `.env.example` and both compose files (`docker-compose.yml`, `deploy/docker-compose.yml`).
+- Add or adjust tests for SIP/media changes. The loopback tests catch most dialog bugs quickly. Auth changes belong in `tests/test_login_security.py`.
 
 ## Hard-won facts (don't re-learn these)
 
@@ -87,6 +92,7 @@ Local test-environment details (PBX, camera, credentials, where it's deployed) l
 - Several bridges per phone: incoming calls are routed by caller in `Store.route_bridge()` (listed caller → default bridge → 403), and `Store.routing_conflict()` enforces unambiguous routing on save. Nothing may assume one bridge per phone.
 - Client-transaction lingering uses `loop.call_later`, not sleeping tasks. Sleeping tasks made every test take 32 s and slowed shutdown.
 - **Client IPs:** uvicorn's proxy-header handling is off (`proxy_headers=False` on both listeners); the app wraps itself in `ProxyHeadersMiddleware` with `CAM2SIP_TRUSTED_PROXIES`. Never use `forwarded_allow_ips="*"`: it makes the left-most, client-supplied `X-Forwarded-For` entry the client IP, which defeats the login throttle (`auth.LoginThrottle`).
+- Tests pick the client address with `TestClient(app, client=(ip, port))`. The proxy middleware is inside the app, so tests cover `X-Forwarded-For` handling; `172.17.0.2` (Docker bridge) is trusted by the default `private` setting, a public address isn't.
 - `SECURE_COOKIES=auto` marks the cookie `Secure` only for HTTPS reported by a trusted proxy, not for the direct :8443 listener: browsers don't let an `http://` page overwrite a `Secure` cookie, so it would break sign-in on :8090 for the same host.
 
 ## Release
