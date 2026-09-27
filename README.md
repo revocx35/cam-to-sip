@@ -276,7 +276,7 @@ Trigger it from a doorbell button, a Frigate `person` event, and so on. The full
 
 - The web UI needs the admin password (at least 10 characters). The API accepts the session cookie or `Authorization: Bearer <token>`.
 - Wrong passwords are throttled: after 5 failures a client IP is locked out for 30 s, doubling up to 1 h, and after 50 failures in a row from anywhere, only one try per 15 min is allowed. The API answers `429` with `Retry-After`. The lockout lives in memory: restart the container to clear it.
-- Requests that another site starts in the browser (including sibling subdomains of the same domain) are refused with `403`, and so are cross-site WebSocket connections.
+- Requests that another site starts in the browser (including sibling subdomains of the same domain) are refused with `403`. Browser-call WebSockets are only accepted from the cam2sip page itself (checked with `Sec-Fetch-Site`, or `Origin` in browsers that don't send it). Your reverse proxy must pass the original `Host` header (Nginx Proxy Manager does).
 - Camera, cloud and SIP passwords are stored in plain text in `/data/config.json` (file mode 0600), because they're needed to authenticate. Protect the host and the volume.
 - The UI is served over HTTP (:8090) and HTTPS (:8443) with a self-signed certificate. For access beyond your LAN, put it behind a TLS reverse proxy (nginx, Caddy, Nginx Proxy Manager) with WebSockets enabled:
   - **Set the admin password before you publish the proxy host** (or set `ADMIN_PASSWORD`). Until a password exists, whoever opens the UI first chooses it.

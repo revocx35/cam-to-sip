@@ -11,6 +11,7 @@ import math
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import uvicorn
 import websockets
@@ -50,6 +51,29 @@ def cross_site(headers, method: str = "POST") -> bool:
     if site is None or site in ("same-origin", "none"):
         return False
     return not (method in SAFE_METHODS and headers.get("sec-fetch-mode") == "navigate")
+
+
+def foreign_origin(headers) -> bool:
+    """True when the Origin header names another host than the one the request was sent to.
+
+    WebSockets aren't covered by CORS, so the handshake's Origin is what tells which page opened
+    them, and every browser sends it (RFC 6455), including the ones without Sec-Fetch-Site.
+    Clients without Origin (automations, tests) aren't browsers and pass. The hostname must match
+    the Host header, and the port too when Host carries one: proxies may drop it (nginx `$host`).
+    """
+    origin = headers.get("origin")
+    if origin is None:
+        return False
+    try:
+        o = urlsplit(origin)
+        h = urlsplit("//" + headers.get("host", ""))
+        origin_port = o.port or {"http": 80, "https": 443}.get(o.scheme)
+        host_port = h.port
+    except ValueError:
+        return True
+    if not o.hostname or o.hostname != h.hostname:     # also "null" (sandboxed frames, file://)
+        return True
+    return host_port is not None and host_port != origin_port
 
 
 class PasswordBody(BaseModel):
@@ -681,10 +705,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # -- browser calls (WebSockets) ---------------------------------------------------------------
     def ws_authed(ws: WebSocket) -> bool:
-        # The HTTP middleware doesn't run for WebSockets. SameSite=strict keeps the cookie off
-        # cross-site handshakes, but not off handshakes from sibling subdomains: check the origin too.
+        # The HTTP middleware doesn't run for WebSockets, and CORS doesn't cover them. SameSite=strict
+        # keeps the cookie off cross-site handshakes, but not off handshakes from sibling subdomains
+        # (same site), so check who opened the socket: Sec-Fetch-Site when the browser sends it
+        # (browser-computed, can't be misread through a proxy), else the Origin header.
         s = store.config.settings
         if cross_site(ws.headers):
+            return False
+        if "sec-fetch-site" not in ws.headers and foreign_origin(ws.headers):
             return False
         return auth.check_session(ws.cookies.get(auth.COOKIE), s.session_secret, s.admin_password_hash)
 

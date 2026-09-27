@@ -11,7 +11,7 @@ Public endpoints: `GET /api/health`, `GET /api/session` (also returns `https_por
 
 Password checks (`POST /api/login`, `POST /api/settings/password`) are throttled per client IP and for the whole account. A locked client gets `429` with a `Retry-After` header (seconds). New passwords need at least 10 characters.
 
-Browsers must call the API from the cam2sip page itself: a request or WebSocket that another site starts (`Sec-Fetch-Site: cross-site` or `same-site`) gets `403`. Clients that aren't browsers (curl, Home Assistant) don't send that header and are not affected.
+Browsers must call the API from the cam2sip page itself: a request that another site starts (`Sec-Fetch-Site: cross-site` or `same-site`) gets `403`. WebSockets from another page are refused too, judged by `Sec-Fetch-Site` or, if the browser doesn't send it, by an `Origin` whose host differs from the `Host` header. Clients that aren't browsers (curl, Home Assistant) send neither header and are not affected.
 
 Secret fields (`password`, `cloud_password`) are never returned. Responses contain `""` plus a `<field>_set: true/false` flag. When updating, omit the field or send `""` to keep the stored value.
 
@@ -154,7 +154,7 @@ Menu digits are `0`-`9` and must be unique; `menu_digit` must not be one of them
 
 ### Browser calls (WebSockets)
 
-These are used by the web UI's call page. They authenticate with the session cookie (bearer tokens can't be sent by browsers on WebSockets), and they're served on both the HTTP and the HTTPS port.
+These are used by the web UI's call page. They authenticate with the session cookie (bearer tokens can't be sent by browsers on WebSockets), and they're served on both the HTTP and the HTTPS port. A handshake whose `Origin` isn't the cam2sip page itself gets `{"type":"error","message":"not authenticated"}` and is closed (code 4401).
 
 | Path | Direction | Frames |
 |---|---|---|

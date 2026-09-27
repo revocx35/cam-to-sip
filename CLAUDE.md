@@ -61,7 +61,7 @@ Local test-environment details (PBX, camera, credentials, where it's deployed) l
 - UI: escape all user data with `esc()` in `app.js`. No frameworks and no build step.
 - Web security (the UI may be exposed through a reverse proxy):
   - Every `/api/*` HTTP route gets the cross-site check and auth from `require_auth`. Add a route to `PUBLIC` only if it must work signed out.
-  - WebSocket routes skip the HTTP middleware: call `ws_authed()` right after `accept()`.
+  - WebSocket routes skip the HTTP middleware: call `ws_authed()` right after `accept()`. It checks who opened the socket (`Sec-Fetch-Site`, else `Origin` vs `Host`), then the cookie.
   - Anything that checks the admin password goes through `charge_attempt()` → `password_ok()` → `throttle.success()` (only after everything succeeded). Never compare passwords on the event loop.
   - Use `client_ip(request)` for the client address; don't read `X-Forwarded-For` yourself.
 - When you change env vars, API endpoints or behaviour, update `README.md`, the `docs/` pages, `.env.example` and both compose files (`docker-compose.yml`, `deploy/docker-compose.yml`).
@@ -81,6 +81,7 @@ Local test-environment details (PBX, camera, credentials, where it's deployed) l
 - Asterisk routes a call from extension X to X itself to X's registered contact, so `tools/sip_test_call.py` can use the bridged extension's own credentials as the caller.
 - Browsers only give `getUserMedia` and AudioWorklets to secure contexts. That's why a second uvicorn listener serves TLS on :8443 (`web/tls.py` makes a self-signed certificate with the `openssl` CLI, which is present in `python:3.13-slim`). That listener runs with `lifespan="off"` and a no-op `capture_signals`; two servers capturing signals break shutdown.
 - FastAPI's `@app.middleware("http")` does **not** run for WebSockets. WS endpoints must check the session cookie themselves (`ws_authed`).
+- **Chromium sends no `Sec-Fetch-Site` on WebSocket handshakes** (Firefox and WebKit do); no browser sends `Sec-Fetch-*` to plain-HTTP origins. Measured with Playwright (Chromium/Firefox/WebKit) on 2026-09-27: v1.5.1 relied on `Sec-Fetch-Site` alone and a sibling-subdomain page could still open the camera sockets in Chromium. `Origin` is sent by every browser on WebSocket handshakes, so WS checks must use it (`foreign_origin()`).
 - Headless browser testing: Playwright's Chromium has **no H.264** (MSE unsupported, so the page shows snapshots), and in a container its `audioWorklet.addModule()` never resolves (so `call.js` falls back to a ScriptProcessor after 4 s). Headless Firefox's AudioContext stays `suspended` without an audio device. Run PulseAudio with a null sink in the container, then Firefox exercises the full path (worklet + MSE).
 - The keep-alive for go2rtc's talk source is timer-driven (`CameraLink._keepalive`), because browsers send nothing while push-to-talk is released.
 - `espeak-ng --stdout` writes a WAV header with bogus sizes. `tts._parse_wav` reads the `data` chunk to EOF instead of trusting `wave`.

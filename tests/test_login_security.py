@@ -8,7 +8,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from cam2sip.settings import Settings, parse_trusted_proxies
 from cam2sip.web import auth
-from cam2sip.web.app import create_app
+from cam2sip.web.app import create_app, foreign_origin
 
 from .conftest import free_port
 
@@ -126,6 +126,39 @@ def test_cross_site_requests_are_refused(tmp_path):
             assert ws.receive_json() == {"type": "error", "message": "not authenticated"}
             with pytest.raises(WebSocketDisconnect):
                 ws.receive_json()
+
+
+@pytest.mark.parametrize("origin, host, foreign", [
+    ("https://cam.example.com", "cam.example.com", False),         # through Nginx Proxy Manager
+    ("https://cam.example.com:4443", "cam.example.com", False),    # proxy dropped the port ($host)
+    ("http://192.168.1.10:8090", "192.168.1.10:8090", False),     # direct on the LAN
+    ("https://192.168.1.10:8443", "192.168.1.10:8443", False),
+    ("https://CAM.example.com", "cam.example.com", False),
+    ("http://[fd00::5]:8090", "[fd00::5]:8090", False),
+    (None, "cam.example.com", False),                              # not a browser
+    ("https://evil.example.com", "cam.example.com", True),         # sibling subdomain
+    ("https://cam.example.com.evil.net", "cam.example.com", True),
+    ("http://192.168.1.10:8123", "192.168.1.10:8090", True),       # another app on the same host
+    ("null", "cam.example.com", True),                             # sandboxed frame / file://
+    ("https://cam.example.com:99999", "cam.example.com", True),
+])
+def test_foreign_origin(origin, host, foreign):
+    headers = {"host": host} if origin is None else {"host": host, "origin": origin}
+    assert foreign_origin(headers) is foreign
+
+
+def test_websocket_from_another_origin_is_refused(app):
+    """Browsers without Sec-Fetch-Site on WebSockets still send Origin: a page on another subdomain
+    must not open a camera's talk/video socket with the admin's cookie."""
+    c = client_at(app, "192.168.1.70")
+    assert login(c, PASSWORD).status_code == 200
+    cam = c.post("/api/cameras", json={"name": "Door", "kind": "tapo", "host": "10.0.0.5"}).json()
+    for path in (f"/api/cameras/{cam['id']}/video", f"/api/cameras/{cam['id']}/talk"):
+        with c.websocket_connect(path, headers={"Origin": "https://evil.example.com"}) as ws:
+            assert ws.receive_json() == {"type": "error", "message": "not authenticated"}
+    # the app's own page gets past the check (and then fails on the missing go2rtc)
+    with c.websocket_connect(f"/api/cameras/{cam['id']}/video", headers={"Origin": "http://testserver"}) as ws:
+        assert ws.receive_json()["message"].startswith("go2rtc unavailable")
 
 
 def test_cookie_is_secure_behind_https_proxy(app):
