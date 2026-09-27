@@ -86,6 +86,8 @@ Local test-environment details (PBX, camera, credentials, where it's deployed) l
 - Natural TTS: `media/piper.py` runs `python -m piper.http_server` (GPL-3.0, separate process) on 127.0.0.1:18556; voice ids are `piper:<key>`, downloaded from rhasspy/piper-voices into /data/voices. Tests must never download: `tests/conftest.py` makes the catalog unavailable by default (fake it per test).
 - Several bridges per phone: incoming calls are routed by caller in `Store.route_bridge()` (listed caller → default bridge → 403), and `Store.routing_conflict()` enforces unambiguous routing on save. Nothing may assume one bridge per phone.
 - Client-transaction lingering uses `loop.call_later`, not sleeping tasks. Sleeping tasks made every test take 32 s and slowed shutdown.
+- **Client IPs:** uvicorn's proxy-header handling is off (`proxy_headers=False` on both listeners); the app wraps itself in `ProxyHeadersMiddleware` with `CAM2SIP_TRUSTED_PROXIES`. Never use `forwarded_allow_ips="*"`: it makes the left-most, client-supplied `X-Forwarded-For` entry the client IP, which defeats the login throttle (`auth.LoginThrottle`).
+- `SECURE_COOKIES=auto` marks the cookie `Secure` only for HTTPS reported by a trusted proxy, not for the direct :8443 listener: browsers don't let an `http://` page overwrite a `Secure` cookie, so it would break sign-in on :8090 for the same host.
 
 ## Release
 

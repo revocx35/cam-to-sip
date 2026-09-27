@@ -39,14 +39,15 @@ services:
       CAM2SIP_RTP_PORT_MIN: "16000"
       CAM2SIP_RTP_PORT_MAX: "16199"
       CAM2SIP_ADVERTISE_IP: ""            # empty = auto-detect the interface towards the PBX
-      CAM2SIP_ADMIN_PASSWORD: ""          # empty = choose one in the UI on first visit
+      CAM2SIP_ADMIN_PASSWORD: ""          # empty = choose one in the UI on first visit (do that before exposing it)
       CAM2SIP_TALK_PORT: "18555"
       CAM2SIP_PIPER_PORT: "18556"          # local natural-voice (Piper) TTS process
       CAM2SIP_GO2RTC_API: http://127.0.0.1:11984
       CAM2SIP_GO2RTC_RTSP: rtsp://127.0.0.1:18554
       CAM2SIP_LOG_LEVEL: INFO
       CAM2SIP_SIP_TRACE: "false"
-      CAM2SIP_SECURE_COOKIES: "false"     # true when served through an HTTPS reverse proxy only
+      CAM2SIP_SECURE_COOKIES: "auto"      # Secure cookie when a trusted reverse proxy reports HTTPS
+      CAM2SIP_TRUSTED_PROXIES: "private"  # proxies allowed to set X-Forwarded-For/-Proto (IPs/CIDRs, private, none)
     volumes:
       - cam2sip-data:/data                # config.json, call history, TLS certificate
 

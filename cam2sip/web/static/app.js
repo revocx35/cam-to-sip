@@ -1109,7 +1109,7 @@ pages.settings = async () => {
       <div class="card"><h2>Change admin password</h2>
         <form id="pw-form" style="margin-top:10px">
           <label>Current password<input name="current" type="password" required autocomplete="current-password"></label>
-          <label>New password<input name="new" type="password" required minlength="6" autocomplete="new-password"></label>
+          <label>New password<input name="new" type="password" required minlength="10" autocomplete="new-password"></label>
           <div class="error" id="pw-error"></div>
           <div class="form-actions"><button class="btn primary" type="submit">Change password</button></div>
         </form></div>
@@ -1226,7 +1226,11 @@ function showAuth(setup) {
   $('#auth-confirm-wrap').classList.toggle('hidden', !setup);
   $('#auth-submit').textContent = setup ? 'Create password' : 'Sign in';
   $('#auth-form').dataset.setup = setup ? '1' : '';
-  $('#auth-password').focus();
+  // the minimum applies to new passwords only; older, shorter ones can still sign in
+  const pw = $('#auth-password');
+  if (setup) pw.minLength = 10; else pw.removeAttribute('minlength');
+  pw.autocomplete = setup ? 'new-password' : 'current-password';
+  pw.focus();
 }
 
 $('#auth-form').onsubmit = async e => {

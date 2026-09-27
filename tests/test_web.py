@@ -26,8 +26,8 @@ def client(tmp_path):
 def test_setup_login_and_crud(client):
     assert client.get("/api/session").json()["setup_required"] is True
     assert client.get("/api/cameras").status_code == 401
-    assert client.post("/api/setup", json={"password": "secret1"}).status_code == 200
-    assert client.post("/api/setup", json={"password": "again12"}).status_code == 409
+    assert client.post("/api/setup", json={"password": "secret1234"}).status_code == 200
+    assert client.post("/api/setup", json={"password": "again12345"}).status_code == 409
 
     cam = client.post("/api/cameras", json={"name": "Door", "kind": "tapo", "host": "10.0.0.5",
                                             "username": "u", "password": "p@ss", "cloud_password": "cloud"}).json()
@@ -60,7 +60,7 @@ def test_setup_login_and_crud(client):
     ok = client.get("/api/bridges", headers={"Authorization": f"Bearer {token}"})
     assert ok.status_code == 200 and len(ok.json()) == 1
     assert client.post("/api/login", json={"password": "wrong"}).status_code == 401
-    assert client.post("/api/login", json={"password": "secret1"}).status_code == 200
+    assert client.post("/api/login", json={"password": "secret1234"}).status_code == 200
     assert client.delete(f"/api/bridges/{bridge['id']}").status_code == 200
     assert client.delete(f"/api/cameras/{cam['id']}").status_code == 200
 
@@ -86,7 +86,7 @@ def test_camera_sources():
 
 
 def test_ivr_bridge_api(client):
-    client.post("/api/setup", json={"password": "secret1"})
+    client.post("/api/setup", json={"password": "secret1234"})
     a = client.post("/api/cameras", json={"name": "Front", "kind": "tapo", "host": "10.0.0.5"}).json()
     b = client.post("/api/cameras", json={"name": "Garage", "kind": "tapo", "host": "10.0.0.6"}).json()
     ph = client.post("/api/phones", json={"name": "P", "server": "127.0.0.1", "port": 9, "username": "1"}).json()

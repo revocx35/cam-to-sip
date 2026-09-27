@@ -37,7 +37,7 @@ def settings(tmp_path, **kw):
 
 def test_sounds_api(tmp_path):
     with TestClient(create_app(settings(tmp_path))) as c:
-        c.post("/api/setup", json={"password": "secret1"})
+        c.post("/api/setup", json={"password": "secret1234"})
         r = c.post("/api/sounds?name=Door%20chime", content=make_wav(1.0), headers={"Content-Type": "audio/wav"})
         assert r.status_code == 200
         snd = r.json()

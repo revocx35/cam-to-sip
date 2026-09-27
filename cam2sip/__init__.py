@@ -1,3 +1,3 @@
 """cam2sip - bridge IP camera audio (mic + speaker) to SIP phones."""
 
-__version__ = "1.5.0"
+__version__ = "1.5.1"

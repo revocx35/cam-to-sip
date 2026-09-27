@@ -7,6 +7,7 @@ import contextlib
 import hmac
 import json
 import logging
+import math
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -16,7 +17,8 @@ import websockets
 from fastapi import FastAPI, HTTPException, Request, Response, WebSocket
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
+from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from .. import onvif
 from ..media import piper as piper_mod
@@ -33,15 +35,30 @@ from .tls import ensure_certificate
 log = logging.getLogger("cam2sip.web")
 STATIC = Path(__file__).parent / "static"
 PUBLIC = {"/api/health", "/api/session", "/api/login", "/api/logout", "/api/setup"}
+SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def cross_site(headers, method: str = "POST") -> bool:
+    """True for a browser request that another site started (Fetch Metadata).
+
+    SameSite=strict keeps the cookie off cross-site requests, but not off requests from sibling
+    subdomains (same site), and it doesn't cover /api/setup, which needs no cookie. Only our own
+    pages may change state or open WebSockets; plain navigations are fine. Clients that don't send
+    Sec-Fetch-Site (curl, Home Assistant) aren't browsers and are unaffected.
+    """
+    site = headers.get("sec-fetch-site")
+    if site is None or site in ("same-origin", "none"):
+        return False
+    return not (method in SAFE_METHODS and headers.get("sec-fetch-mode") == "navigate")
 
 
 class PasswordBody(BaseModel):
-    password: str
+    password: str = Field(max_length=1024)
 
 
 class ChangePasswordBody(BaseModel):
-    current: str
-    new: str
+    current: str = Field(max_length=1024)
+    new: str = Field(max_length=1024)
 
 
 class DialBody(BaseModel):
@@ -114,6 +131,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     cfg = store.config
 
     if settings.admin_password and not cfg.settings.admin_password_hash:
+        if len(settings.admin_password) < auth.MIN_PASSWORD_LENGTH:
+            log.warning("ADMIN_PASSWORD is shorter than %d characters - choose a longer one before "
+                        "exposing the UI", auth.MIN_PASSWORD_LENGTH)
         cfg.settings.admin_password_hash = auth.hash_password(settings.admin_password)
         store.save()
 
@@ -139,8 +159,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return None
         config = uvicorn.Config(asgi_app, host=settings.web_host, port=settings.https_port,
                                 ssl_certfile=pair[0], ssl_keyfile=pair[1], lifespan="off",
-                                log_config=None, access_log=False, proxy_headers=True,
-                                forwarded_allow_ips="*", timeout_graceful_shutdown=3)
+                                log_config=None, access_log=False, proxy_headers=False,
+                                timeout_graceful_shutdown=3)
         server = _NoSignalServer(config)
         task = asyncio.create_task(server.serve())
         for _ in range(50):
@@ -170,16 +190,49 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.middleware("http")
     async def require_auth(request: Request, call_next):
         path = request.url.path
-        if path.startswith("/api/") and path not in PUBLIC and not path.startswith(("/api/docs", "/api/openapi")):
-            if not authed(request):
+        if path.startswith("/api/"):
+            if cross_site(request.headers, request.method):
+                return JSONResponse({"detail": "cross-site request refused"}, status_code=403)
+            if path not in PUBLIC and not authed(request):
                 return JSONResponse({"detail": "not authenticated"}, status_code=401)
         return await call_next(request)
 
-    def set_cookie(resp: Response) -> None:
+    # X-Forwarded-For/-Proto count only from trusted reverse proxies (CAM2SIP_TRUSTED_PROXIES).
+    # Added last, so it runs first; uvicorn's own proxy handling is off (see __main__/start_https).
+    app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=settings.trusted_proxies)
+
+    throttle = auth.LoginThrottle()
+    scrypt_slots = asyncio.Semaphore(2)
+
+    async def password_ok(password: str, stored: str) -> bool:
+        # scrypt takes ~50 ms of CPU: run it off the event loop so calls keep their audio
+        async with scrypt_slots:
+            return await asyncio.to_thread(auth.verify_password, password, stored)
+
+    def client_ip(request: Request) -> str:
+        return request.client.host if request.client else "unknown"
+
+    def charge_attempt(ip: str) -> None:
+        try:
+            throttle.begin(ip)
+        except auth.Locked as e:
+            wait = max(1, math.ceil(e.retry_after))
+            hint = f"{wait} s" if wait < 120 else f"{math.ceil(wait / 60)} min"
+            raise HTTPException(429, f"too many wrong passwords - try again in {hint}",
+                                headers={"Retry-After": str(wait)}) from None
+
+    def cookie_secure(request: Request) -> bool:
+        if settings.secure_cookies == "auto":
+            # HTTPS as reported by a trusted reverse proxy. Not for the direct :8443 listener: a
+            # Secure cookie there would shadow the plain-HTTP UI on :8090 for the same host.
+            return request.url.scheme == "https" and "x-forwarded-proto" in request.headers
+        return settings.secure_cookies == "true"
+
+    def set_cookie(request: Request, resp: Response) -> None:
         s = store.config.settings
         resp.set_cookie(auth.COOKIE, auth.make_session(s.session_secret, s.admin_password_hash),
                         max_age=auth.SESSION_TTL, httponly=True, samesite="strict",
-                        secure=settings.secure_cookies)
+                        secure=cookie_secure(request))
 
     @app.get("/api/health")
     async def health():
@@ -192,28 +245,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "version": settings.version, "https_port": settings.https_port}
 
     @app.post("/api/setup")
-    async def setup(body: PasswordBody, response: Response):
+    async def setup(body: PasswordBody, request: Request, response: Response):
         if store.config.settings.admin_password_hash:
             raise HTTPException(409, "already set up")
-        if len(body.password) < 6:
-            raise HTTPException(400, "password must be at least 6 characters")
-        store.config.settings.admin_password_hash = auth.hash_password(body.password)
+        if len(body.password) < auth.MIN_PASSWORD_LENGTH:
+            raise HTTPException(400, f"password must be at least {auth.MIN_PASSWORD_LENGTH} characters")
+        pw_hash = await asyncio.to_thread(auth.hash_password, body.password)
+        if store.config.settings.admin_password_hash:     # a parallel setup won the race
+            raise HTTPException(409, "already set up")
+        store.config.settings.admin_password_hash = pw_hash
         store.save()
-        set_cookie(response)
+        log.info("admin password set from %s", client_ip(request))
+        set_cookie(request, response)
         return {"ok": True}
 
     @app.post("/api/login")
-    async def login(body: PasswordBody, response: Response):
+    async def login(body: PasswordBody, request: Request, response: Response):
         h = store.config.settings.admin_password_hash
-        if not h or not auth.verify_password(body.password, h):
-            await asyncio.sleep(1.0)
+        if not h:
             raise HTTPException(401, "wrong password")
-        set_cookie(response)
+        ip = client_ip(request)
+        charge_attempt(ip)
+        if not await password_ok(body.password, h):
+            log.warning("failed admin login from %s", ip)
+            raise HTTPException(401, "wrong password")
+        throttle.success(ip)
+        set_cookie(request, response)
         return {"ok": True}
 
     @app.post("/api/logout")
-    async def logout(response: Response):
-        response.delete_cookie(auth.COOKIE)
+    async def logout(request: Request, response: Response):
+        response.delete_cookie(auth.COOKIE, httponly=True, samesite="strict", secure=cookie_secure(request))
         return {"ok": True}
 
     # -- helpers ------------------------------------------------------------------------
@@ -596,15 +658,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         }
 
     @app.post("/api/settings/password")
-    async def change_password(body: ChangePasswordBody, response: Response):
+    async def change_password(body: ChangePasswordBody, request: Request, response: Response):
         s = cfg.settings
-        if not auth.verify_password(body.current, s.admin_password_hash):
+        if len(body.new) < auth.MIN_PASSWORD_LENGTH:
+            raise HTTPException(400, f"password must be at least {auth.MIN_PASSWORD_LENGTH} characters")
+        ip = client_ip(request)
+        charge_attempt(ip)
+        if not await password_ok(body.current, s.admin_password_hash):
+            log.warning("wrong current password in password change from %s", ip)
             raise HTTPException(401, "current password is wrong")
-        if len(body.new) < 6:
-            raise HTTPException(400, "password must be at least 6 characters")
-        s.admin_password_hash = auth.hash_password(body.new)
+        throttle.success(ip)
+        s.admin_password_hash = await asyncio.to_thread(auth.hash_password, body.new)
         store.save()
-        set_cookie(response)
+        set_cookie(request, response)
         return {"ok": True}
 
     @app.post("/api/settings/api-token")
@@ -615,9 +681,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # -- browser calls (WebSockets) ---------------------------------------------------------------
     def ws_authed(ws: WebSocket) -> bool:
-        # the HTTP middleware doesn't run for WebSockets; the SameSite=strict session
-        # cookie is not sent on cross-site WebSocket handshakes
+        # The HTTP middleware doesn't run for WebSockets. SameSite=strict keeps the cookie off
+        # cross-site handshakes, but not off handshakes from sibling subdomains: check the origin too.
         s = store.config.settings
+        if cross_site(ws.headers):
+            return False
         return auth.check_session(ws.cookies.get(auth.COOKIE), s.session_secret, s.admin_password_hash)
 
     async def ws_reject(ws: WebSocket, message: str, code: int) -> None:

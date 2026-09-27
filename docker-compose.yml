@@ -47,7 +47,8 @@ services:
       CAM2SIP_GO2RTC_RTSP: rtsp://127.0.0.1:${GO2RTC_RTSP_PORT:-18554}
       CAM2SIP_LOG_LEVEL: ${LOG_LEVEL:-INFO}
       CAM2SIP_SIP_TRACE: ${SIP_TRACE:-false}
-      CAM2SIP_SECURE_COOKIES: ${SECURE_COOKIES:-false}
+      CAM2SIP_SECURE_COOKIES: ${SECURE_COOKIES:-auto}
+      CAM2SIP_TRUSTED_PROXIES: ${TRUSTED_PROXIES:-private}
     volumes:
       - cam2sip-data:/data
 

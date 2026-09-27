@@ -114,7 +114,7 @@ All settings are optional environment variables, set in `.env` (see [.env.exampl
 | `WEB_PORT` | `8090` | Web UI / REST API port (HTTP) |
 | `HTTPS_PORT` | `8443` | Same UI over HTTPS, needed for the microphone in browser calls. `0` turns it off |
 | `TLS_CERT` / `TLS_KEY` | *(self-signed)* | Your own certificate/key paths inside the container. Otherwise a self-signed pair is created in `/data/tls` |
-| `ADMIN_PASSWORD` | *(empty)* | Initial admin password (otherwise chosen in the UI on first visit) |
+| `ADMIN_PASSWORD` | *(empty)* | Initial admin password (otherwise chosen in the UI on first visit). At least 10 characters |
 | `SIP_PORT` | `5062` | Local UDP port shared by all virtual phones |
 | `RTP_PORT_MIN` / `RTP_PORT_MAX` | `16000` / `16199` | UDP range for call audio (one port per call) |
 | `ADVERTISE_IP` | auto | IP address put in SIP Contact/SDP. Auto = the interface that routes to the PBX |
@@ -123,7 +123,8 @@ All settings are optional environment variables, set in `.env` (see [.env.exampl
 | `PIPER_PORT` | `18556` | Internal natural-voice TTS process (127.0.0.1) |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING` |
 | `SIP_TRACE` | `false` | Log every SIP message (debugging registration/calls) |
-| `SECURE_COOKIES` | `false` | Mark the session cookie `Secure` (UI served via HTTPS proxy) |
+| `SECURE_COOKIES` | `auto` | `Secure` session cookie: `auto` = when a trusted reverse proxy reports HTTPS, `true` = always, `false` = never |
+| `TRUSTED_PROXIES` | `private` | Reverse proxies allowed to set `X-Forwarded-For`/`-Proto`: comma-separated IPs/networks, `private` (loopback + private networks) or `none`. Login throttling uses the client IP they report |
 
 Cameras, phones and bridges are stored in the `cam2sip-data` Docker volume (`/data/config.json`, mode 0600). Back up that volume to keep your configuration.
 
@@ -273,9 +274,15 @@ Trigger it from a doorbell button, a Frigate `person` event, and so on. The full
 
 ## Security
 
-- The web UI needs the admin password. The API accepts the session cookie or `Authorization: Bearer <token>`.
+- The web UI needs the admin password (at least 10 characters). The API accepts the session cookie or `Authorization: Bearer <token>`.
+- Wrong passwords are throttled: after 5 failures a client IP is locked out for 30 s, doubling up to 1 h, and after 50 failures in a row from anywhere, only one try per 15 min is allowed. The API answers `429` with `Retry-After`. The lockout lives in memory: restart the container to clear it.
+- Requests that another site starts in the browser (including sibling subdomains of the same domain) are refused with `403`, and so are cross-site WebSocket connections.
 - Camera, cloud and SIP passwords are stored in plain text in `/data/config.json` (file mode 0600), because they're needed to authenticate. Protect the host and the volume.
-- The UI is served over HTTP (:8090) and HTTPS (:8443) with a self-signed certificate. For access beyond your LAN, put it behind a TLS reverse proxy (nginx, Caddy, Nginx Proxy Manager) with WebSockets enabled, and set `SECURE_COOKIES=true` in `.env`.
+- The UI is served over HTTP (:8090) and HTTPS (:8443) with a self-signed certificate. For access beyond your LAN, put it behind a TLS reverse proxy (nginx, Caddy, Nginx Proxy Manager) with WebSockets enabled:
+  - **Set the admin password before you publish the proxy host** (or set `ADMIN_PASSWORD`). Until a password exists, whoever opens the UI first chooses it.
+  - The session cookie becomes `Secure` automatically (`SECURE_COOKIES=auto`) when the proxy connects from a private address, which covers a proxy on the same host or LAN. If your proxy connects from a public address, add it to `TRUSTED_PROXIES`. Only list real proxies: whoever connects from a trusted address can claim any client IP.
+  - Behind a second proxy (e.g. Cloudflare in front of Nginx Proxy Manager), add that proxy's ranges to `TRUSTED_PROXIES` too, otherwise throttling sees its address instead of the client's.
+  - A logged-in admin can point a *custom* camera at any go2rtc source, including ones that run programs (`exec:`). Treat the admin password like a password for the host.
 - Inbound SIP is not authenticated (like a desk phone). Keep UDP 5062 reachable from your PBX only, and use *Allowed callers* where it matters.
 
 ## Development

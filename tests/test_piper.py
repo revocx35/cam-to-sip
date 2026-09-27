@@ -106,7 +106,7 @@ def test_voices_api(tmp_path, monkeypatch):
     s = Settings(data_dir=str(tmp_path), sip_port=free_port(), talk_port=free_port(), https_port=0,
                  go2rtc_api="http://127.0.0.1:9", rtp_port_min=31400, rtp_port_max=31419)
     with TestClient(create_app(s)) as c:
-        c.post("/api/setup", json={"password": "secret1"})
+        c.post("/api/setup", json={"password": "secret1234"})
         engine = c.app.state.engine
         piper = engine.tts.piper
 

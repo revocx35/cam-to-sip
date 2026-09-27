@@ -332,7 +332,10 @@ The PBX handles transcoding and security at the edge.
 
 ## 7. Web UI & API
 
-- FastAPI serves `/api/*` and the static SPA (`/`, `/static/*`). Interactive docs are at `/api/docs`.
+- FastAPI serves `/api/*` and the static SPA (`/`, `/static/*`). Interactive docs are at `/api/docs` (login required).
+- uvicorn's own proxy-header handling is off. The app wraps itself in `ProxyHeadersMiddleware` with `CAM2SIP_TRUSTED_PROXIES`, so only those peers can set `X-Forwarded-For`/`-Proto`, and the client IP is the right-most untrusted `X-Forwarded-For` entry.
+- Every `/api/*` request and WebSocket that a browser marks as started by another site (`Sec-Fetch-Site` other than `same-origin`/`none`, except navigations) is refused. That covers what `SameSite=strict` doesn't: sibling subdomains and `/api/setup`.
+- Password checks go through `auth.LoginThrottle` (per IP + whole account, charged before scrypt, refunded on success) and run scrypt in a worker thread, so a login flood can't stall call audio.
 - Auth middleware protects every `/api/*` route except `health`, `session`, `login`, `logout` and `setup`. It accepts either:
   - an HMAC-signed session cookie bound to the password hash, so changing the password logs out old sessions, or
   - `Authorization: Bearer <api_token>`.

@@ -42,7 +42,7 @@ def test_bridge_api_conflicts(tmp_path):
     s = Settings(data_dir=str(tmp_path), sip_port=free_port(), talk_port=free_port(), https_port=0,
                  go2rtc_api="http://127.0.0.1:9", rtp_port_min=31500, rtp_port_max=31519)
     with TestClient(create_app(s)) as c:
-        c.post("/api/setup", json={"password": "secret1"})
+        c.post("/api/setup", json={"password": "secret1234"})
         cam = c.post("/api/cameras", json={"name": "Door", "host": "h"}).json()
         ph = c.post("/api/phones", json={"name": "P", "server": "127.0.0.1", "port": 9, "username": "1008"}).json()
         ivr = c.post("/api/bridges", json={"phone_id": ph["id"], "mode": "ivr", "allowed_callers": ["1005"],

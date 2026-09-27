@@ -1,13 +1,17 @@
 # REST API
 
-Base URL: `http://<server>:8090/api`. Interactive OpenAPI docs are at `/api/docs`.
+Base URL: `http://<server>:8090/api`. Interactive OpenAPI docs are at `/api/docs` (sign in to the web UI first).
 
 ## Authentication
 
 - **Browser**: `POST /api/login {"password": "…"}` sets an HTTP-only session cookie (7 days).
 - **Automations**: send `Authorization: Bearer <api-token>`. The token is under **Settings → Automation API** and can be regenerated there.
 
-Public endpoints: `GET /api/health`, `GET /api/session` (also returns `https_port`), `POST /api/login`, `POST /api/logout`, `POST /api/setup` (first run only).
+Public endpoints: `GET /api/health`, `GET /api/session` (also returns `https_port`), `POST /api/login`, `POST /api/logout`, `POST /api/setup` (first run only). Everything else, `/api/docs` and `/api/openapi.json` included, needs the cookie or the token.
+
+Password checks (`POST /api/login`, `POST /api/settings/password`) are throttled per client IP and for the whole account. A locked client gets `429` with a `Retry-After` header (seconds). New passwords need at least 10 characters.
+
+Browsers must call the API from the cam2sip page itself: a request or WebSocket that another site starts (`Sec-Fetch-Site: cross-site` or `same-site`) gets `403`. Clients that aren't browsers (curl, Home Assistant) don't send that header and are not affected.
 
 Secret fields (`password`, `cloud_password`) are never returned. Responses contain `""` plus a `<field>_set: true/false` flag. When updating, omit the field or send `""` to keep the stored value.
 
