@@ -36,7 +36,8 @@ Runs as a small Docker Compose stack with a web UI for configuration.
   - **any go2rtc source** (`rtsp://`, `tapo://`, `dvrip://`, `exec:` backchannels, …).
 - **Bridges** link one camera to one phone, with auto-answer after N rings, mic/speaker gain, a noise gate, a caller whitelist and a max call duration.
 - **Outbound "doorbell" calls**: the camera calls an extension or ring group, from the UI or the REST API (Home Assistant, Frigate, Node-RED…).
-- **IVR camera menu**: one virtual phone can serve several cameras. Callers hear a spoken menu (*"Press 1 for Front door. Press 2 for Garage."*), press a digit, and can press `*` during the call to switch. Prompts are offline text-to-speech (espeak-ng) with 100+ languages.
+- **IVR camera menu**: one virtual phone can serve several cameras. Callers hear a spoken menu (*"Press 1 for Front door. Press 2 for Garage."*), press a digit, and can press `*` during the call to switch.
+- **Natural voices**: offline neural text-to-speech (Piper) in about 40 languages, downloaded on demand, with espeak-ng (100+ languages) as fallback.
 - **Call notice (privacy)**: per camera, announce *"A call has started on this camera"* (your own text, or an uploaded recording) on the camera speaker when any call connects. The camera mic stays muted until it has played.
 - **Uploaded sounds**: use your own recordings (MP3, WAV, OGG, M4A…) for IVR prompts and call notices instead of text-to-speech.
 - **Browser calls**: click *Call* on a camera to get live video plus two-way audio in the browser, with push-to-talk (button or space bar) or hands-free open mic. No SIP phone needed.
@@ -119,6 +120,7 @@ All settings are optional environment variables, set in `.env` (see [.env.exampl
 | `ADVERTISE_IP` | auto | IP address put in SIP Contact/SDP. Auto = the interface that routes to the PBX |
 | `GO2RTC_API_PORT` / `GO2RTC_RTSP_PORT` | `11984` / `18554` | go2rtc, bound to 127.0.0.1 only |
 | `TALK_PORT` | `18555` | Internal RTSP server that go2rtc pulls speaker audio from (127.0.0.1) |
+| `PIPER_PORT` | `18556` | Internal natural-voice TTS process (127.0.0.1) |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING` |
 | `SIP_TRACE` | `false` | Log every SIP message (debugging registration/calls) |
 | `SECURE_COOKIES` | `false` | Mark the session cookie `Secure` (UI served via HTTPS proxy) |

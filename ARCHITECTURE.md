@@ -39,7 +39,7 @@ flowchart LR
 
 | Container | Image | Listens on | Role |
 |---|---|---|---|
-| `cam2sip` | built from this repo | `0.0.0.0:8090/tcp` (UI/API), `0.0.0.0:8443/tcp` (same over TLS), `0.0.0.0:5062/udp` (SIP), `16000-16199/udp` (RTP), `127.0.0.1:18555/tcp` (talk RTSP) | SIP UA, bridge engine, web UI, browser calls |
+| `cam2sip` | built from this repo | `0.0.0.0:8090/tcp` (UI/API), `0.0.0.0:8443/tcp` (same over TLS), `0.0.0.0:5062/udp` (SIP), `16000-16199/udp` (RTP), `127.0.0.1:18555/tcp` (talk RTSP), `127.0.0.1:18556/tcp` (Piper TTS child process) | SIP UA, bridge engine, web UI, browser calls, text-to-speech |
 | `cam2sip-go2rtc` | `alexxit/go2rtc:1.9.14` | `127.0.0.1:11984` (API), `127.0.0.1:18554` (RTSP) | camera protocols, backchannel, snapshots, transcoding |
 
 Both containers use **host networking**:
@@ -76,7 +76,8 @@ cam2sip/
     g711.py          A-law/mu-law tables, translate+gain tables, level meter, tone, WAV
     rtp.py           RTP packets, port allocator, RtpEndpoint (socket), Pacer (jitter buffer)
     rtsp.py          RtspAudioClient (pull mic from go2rtc), TalkServer/TalkSession (serve speaker audio)
-    tts.py           espeak-ng text-to-speech -> 8 kHz prompts (resample, normalise, cache)
+    tts.py           prompt synthesis: Piper ("piper:<voice>") or espeak-ng -> 8 kHz (resample, normalise, cache)
+    piper.py         PiperEngine: Piper HTTP server process, voice catalog, voice downloads
     dtmf.py          Goertzel in-band DTMF detector (fallback when telephone-event isn't negotiated)
   web/
     app.py           FastAPI app: auth middleware, REST API, static UI
@@ -162,6 +163,35 @@ stateDiagram-v2
 - **Barge-in.** In the menu phase any digit is queued and immediately stops the current prompt. A digit queued during an announcement skips the next menu replay.
 - **Digits.** They arrive via RFC 4733 (deduplicated by RTP timestamp), SIP INFO, or the Goertzel detector when no telephone-event was negotiated. While connected, the menu digit returns to the menu; other digits go to the hang-up digit / DTMF actions.
 - Several callers can be in the same bridge's menu at once, and each camera still allows only one call. The history records every camera visited ("Garage, Front door").
+
+### Text-to-speech engines
+
+`media/tts.Tts.pcm(text, voice, speed)` returns 8 kHz samples, and voice ids choose the engine:
+
+| Voice id | Engine | How it runs |
+|---|---|---|
+| `piper:<key>`, e.g. `piper:tr_TR-dfki-medium` | Piper neural TTS | `media/piper.PiperEngine` starts `python -m piper.http_server` as a **child process** on `127.0.0.1:PIPER_PORT`, which keeps voices loaded (~0.2 s per prompt) |
+| anything else, e.g. `en-us`, `tr` | espeak-ng | one `espeak-ng --stdout` subprocess per prompt |
+
+Voice lifecycle:
+
+- Voices are downloaded from the `rhasspy/piper-voices` catalog on Hugging Face into `/data/voices`.
+- Downloads happen when a voice is used, saved (prompt pre-warming), previewed, or requested in Settings.
+- They are single-flight (concurrent callers share one download) and report progress for the UI.
+- `PIPER_PREFIX`/`piper_key()` parse the voice id. Our "words per minute" speed maps to Piper's `length_scale = 165 / wpm`.
+
+When a Piper voice can't be used (Piper missing, offline, download failed), `Tts` falls back to the closest espeak-ng voice (`tr_TR-…` becomes `tr`). The fallback result is **not cached**, so the natural voice takes over once it's available.
+
+After every config change, `Engine._prewarm_prompts()` downloads missing voices and renders every prompt a call could need:
+
+- the menu,
+- invalid and goodbye,
+- busy and connecting for each camera,
+- call notices.
+
+So calls never wait for synthesis.
+
+Piper (GPL-3.0) is only ever run as a separate program over HTTP, like espeak-ng, and is not imported by cam2sip's own code.
 
 ### Outbound: camera calls a phone (doorbell)
 
@@ -345,5 +375,5 @@ camera video ──► go2rtc MSE ──► WebSocket proxy /api/cameras/{id}/vi
 - Tapo talk-back needs the TP-Link cloud password, and on newer firmware *Third-Party Compatibility* enabled.
 - Latency is roughly 150–300 ms end to end (camera chunking plus buffers). Fine for an intercom, not for music.
 - Browser calls need HTTPS for the microphone (self-signed on :8443 by default).
-- IVR prompts use espeak-ng, which is intelligible but robotic. Neural TTS (e.g. Piper) or uploaded recordings would sound better at the cost of image size.
+- Natural voices cost image size (~300 MB for Piper/onnxruntime) and ~150-200 MB RAM per loaded voice, and need internet once per voice download.
 - Ideas: SIP over TCP/TLS, G.722 wideband, video for SIP video phones, MQTT events, recording prompts straight from the browser microphone, WebRTC for browser calls over high-latency links.

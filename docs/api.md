@@ -96,7 +96,7 @@ Camera object:
 | PUT | `/bridges/{id}` | update |
 | DELETE | `/bridges/{id}` | delete |
 | POST | `/bridges/{id}/call` | `{"target": "600", "camera_id": "…"}`: the camera calls a number or SIP URI → `{"call_id"}`. `camera_id` is optional (IVR bridges: which menu camera; default the first). `409` if the camera is busy or the phone isn't registered |
-| GET | `/ivr/voices` | `{"available": true, "voices": [{"id": "en-us", "name": "English (America)"}, …]}` (espeak-ng voices) |
+| GET | `/ivr/voices` | `{"available": true, "voices": [{"id": "en-us", "name": "English (America)"}, …]}` (espeak-ng voices only; see `/tts/voices`) |
 | POST | `/ivr/preview` | bridge-like body (`ivr_options`, `ivr_greeting`, `ivr_option_text`, `ivr_voice`, `ivr_speed`) or `{"text": "…", "ivr_voice": "tr"}` → `audio/wav` of the spoken menu |
 
 ```json
@@ -156,6 +156,22 @@ These are used by the web UI's call page. They authenticate with the session coo
 | `WS /cameras/{id}/video` | both | go2rtc's MSE protocol for this camera only. Send `{"type":"mse","value":"avc1.640029,..."}`; you receive `{"type":"mse","value":"video/mp4; codecs=..."}` followed by binary fMP4 segments |
 
 A talk connection gets `{"type":"error","message":"… is already in a call"}` when the camera is busy (SIP or another browser). Active browser calls show up in `/status` and `/calls` with `"direction": "web"`, and `POST /calls/{id}/hangup` ends them.
+
+### Text-to-speech voices
+
+Voice ids (`ivr_voice`, `notify_voice`, preview `ivr_voice`):
+- `piper:<key>`: natural Piper voice from the [piper-voices catalog](https://huggingface.co/rhasspy/piper-voices), e.g. `piper:en_US-lessac-medium` or `piper:tr_TR-dfki-medium`. It downloads automatically on first use.
+- anything else: an espeak-ng voice, e.g. `en-us`, `en-gb`, `tr`, `de`.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/tts/voices` | `{"piper": {"available", "installed": [{key, name, language, native, country, quality, size_mb, used_by}], "downloads": {key: {"progress": 0..1, "error"}}, "catalog": [...], "catalog_error"}, "espeak": {"available", "voices": [{id, name}]}}` |
+| POST | `/tts/voices/{key}` | start downloading a Piper voice (progress in `downloads`) |
+| DELETE | `/tts/voices/{key}` | delete an installed voice (`409` while a bridge or camera uses it) |
+
+```bash
+curl -X POST http://cam2sip:8090/api/tts/voices/tr_TR-dfki-medium -H "Authorization: Bearer $TOKEN"
+```
 
 ### Sounds
 

@@ -41,6 +41,7 @@ services:
       CAM2SIP_ADVERTISE_IP: ""            # empty = auto-detect the interface towards the PBX
       CAM2SIP_ADMIN_PASSWORD: ""          # empty = choose one in the UI on first visit
       CAM2SIP_TALK_PORT: "18555"
+      CAM2SIP_PIPER_PORT: "18556"          # local natural-voice (Piper) TTS process
       CAM2SIP_GO2RTC_API: http://127.0.0.1:11984
       CAM2SIP_GO2RTC_RTSP: rtsp://127.0.0.1:18554
       CAM2SIP_LOG_LEVEL: INFO

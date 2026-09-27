@@ -55,6 +55,16 @@ Start with **Logs** in the web UI, or `docker logs -f cam2sip`. For SIP problems
 | Hangs up after the menu | No key pressed within *Repeat menu* × (menu length + *Wait after menu*) |
 | `*` doesn't return to the menu | Only in IVR bridges, and only when `*` is the *back-to-menu digit* (and not the hang-up digit) |
 
+## Natural voices (Piper)
+
+| Symptom | Cause / fix |
+|---|---|
+| Prompts sound robotic although a natural voice is selected | The voice is still downloading or the download failed (no internet?). Prompts use espeak-ng meanwhile. Check **Settings → Voices** and the logs (`cam2sip.piper`) |
+| "voice catalog unavailable" | The server can't reach huggingface.co. Voices already installed keep working; to add new ones, allow HTTPS to huggingface.co (or copy `<key>.onnx` + `<key>.onnx.json` into the data volume's `voices/` folder) |
+| First preview of a new voice takes long | It downloads 20-120 MB first; later prompts take ~0.2 s |
+| High memory use | Each loaded natural voice needs ~150-200 MB RAM. Use fewer different voices, or delete unused ones and restart |
+| `pthread_setaffinity_np failed` in debug logs | Harmless onnxruntime message inside LXC containers |
+
 ## Call notice & sounds
 
 | Symptom | Cause / fix |
