@@ -175,6 +175,16 @@ function bridgeCameras(b) {
   if (b.mode !== 'ivr') return esc(camById(b.camera_id)?.name || 'missing');
   return b.ivr_options.map(o => `<span class="badge plain">${esc(o.digit)}</span> ${esc(optionName(o))}`).join(' &nbsp;');
 }
+function callersText(b) {
+  if (b.allowed_callers.length) return b.allowed_callers.join(', ');
+  const shared = state.bridges.filter(o => o.phone_id === b.phone_id && o.enabled).length > 1;
+  return shared ? 'everyone else (default)' : 'anyone';
+}
+function phoneRoutes(pid) {
+  const list = state.bridges.filter(b => b.phone_id === pid);
+  list.sort((a, b) => (!a.allowed_callers.length) - (!b.allowed_callers.length));
+  return list.map(b => `<div>${esc(callersText(b))} → ${esc(b.name || b.id)} ${b.mode === 'ivr' ? badge('IVR', 'info', true) : ''}${b.enabled ? '' : ' ' + badge('disabled')}</div>`).join('');
+}
 function bridgeState(b, st) {
   if (!b.enabled) return badge('disabled');
   if (st.calls.some(c => c.bridge_id === b.id)) return badge('in call', 'info');
@@ -355,7 +365,7 @@ pages.dashboard = async () => {
         <tr><th>Bridge</th><th>Camera(s)</th><th>Phone</th><th>Registration</th><th>Status</th><th></th></tr>
         ${state.bridges.map(b => {
           const ph = phoneById(b.phone_id);
-          return `<tr><td>${esc(b.name || b.id)}${b.mode === 'ivr' ? ' ' + badge('IVR', 'info', true) : ''}</td><td>${bridgeCameras(b)}</td>
+          return `<tr><td>${esc(b.name || b.id)}${b.mode === 'ivr' ? ' ' + badge('IVR', 'info', true) : ''}<div class="muted small">callers: ${esc(callersText(b))}</div></td><td>${bridgeCameras(b)}</td>
             <td>${esc(ph ? `${ph.username}@${ph.server}` : '?')}</td>
             <td>${phoneBadge(st.phones[b.phone_id])}</td>
             <td>${bridgeState(b, st)}</td>
@@ -607,6 +617,7 @@ pages.phones = async () => {
             <dt>Display name</dt><dd>${esc(p.display_name || '-')}</dd>
             <dt>Last register</dt><dd>${esc(ago(st.last_register))}</dd>
             <dt>Contact</dt><dd class="mono">${esc(st.contact || '-')}</dd>
+            <dt>Routing</dt><dd>${phoneRoutes(p.id) || '<span class="muted">no bridge yet</span>'}</dd>
           </dl>
           <div class="card-actions">
             <button class="btn small" data-act="register">Re-register</button>
@@ -627,7 +638,7 @@ pages.phones = async () => {
       });
     });
   };
-  state.phones = await api('GET', '/phones');
+  [state.phones, state.bridges] = await Promise.all([api('GET', '/phones'), api('GET', '/bridges')]);
   render();
   every(3000, async () => { if ($('#modal:not(.hidden)')) return; state.phones = await api('GET', '/phones'); render(); });
 };
@@ -695,7 +706,7 @@ pages.bridges = async () => {
             <dt>Answer</dt><dd>${b.answer_delay ? `after ${b.answer_delay}s of ringing` : 'immediately'}</dd>
             <dt>Gain</dt><dd>mic ${b.mic_gain_db >= 0 ? '+' : ''}${b.mic_gain_db} dB · speaker ${b.speaker_gain_db >= 0 ? '+' : ''}${b.speaker_gain_db} dB</dd>
             <dt>Noise gate</dt><dd>${b.speaker_gate_db === null ? 'off' : `${b.speaker_gate_db} dBFS`}</dd>
-            <dt>Callers</dt><dd>${b.allowed_callers.length ? esc(b.allowed_callers.join(', ')) : 'anyone'}</dd>
+            <dt>Callers</dt><dd>${esc(callersText(b))}</dd>
           </dl>
           <div class="card-actions">
             <button class="btn small" data-act="dial">Call…</button>
@@ -753,13 +764,15 @@ async function bridgeForm(b) {
   await ensureVoices();
   const x = Object.assign({}, BRIDGE_DEFAULTS, b || {});
   x.ivr_options = (x.ivr_options || []).map(o => Object.assign({ sound: '' }, o));
-  const usedPhones = new Set(state.bridges.filter(o => o.id !== b?.id).map(o => o.phone_id));
   const opts = x.ivr_options.length ? x.ivr_options : state.cameras.slice(0, 2).map((c, i) => ({ digit: String(i + 1), camera_id: c.id }));
   openModal(b ? 'Edit bridge' : 'New bridge', `
     <form id="bridge-form" autocomplete="off">
       <label>Name <span class="hint">optional</span><input name="name" value="${esc(x.name)}" placeholder="Front door intercom"></label>
       <div class="row">
-        <label>Virtual phone<select name="phone_id" required>${state.phones.map(p => `<option value="${esc(p.id)}" ${p.id === x.phone_id ? 'selected' : ''} ${usedPhones.has(p.id) ? 'disabled' : ''}>${esc(p.name)} (${esc(p.username)})${usedPhones.has(p.id) ? ' - already bridged' : ''}</option>`).join('')}</select></label>
+        <label>Virtual phone<select name="phone_id" required>${state.phones.map(p => {
+          const n = state.bridges.filter(o => o.phone_id === p.id && o.id !== b?.id).length;
+          return `<option value="${esc(p.id)}" ${p.id === x.phone_id ? 'selected' : ''}>${esc(p.name)} (${esc(p.username)})${n ? ` · ${n} other bridge${n > 1 ? 's' : ''}` : ''}</option>`;
+        }).join('')}</select></label>
         <label>When the phone is called<select name="mode">
           <option value="direct" ${x.mode !== 'ivr' ? 'selected' : ''}>Connect one camera directly</option>
           <option value="ivr" ${x.mode === 'ivr' ? 'selected' : ''}>Play a menu to pick a camera (IVR)</option>
@@ -797,7 +810,8 @@ async function bridgeForm(b) {
           <label>Ring before answering (s)<input name="answer_delay" type="number" min="0" max="60" step="0.5" value="${esc(x.answer_delay)}"></label>
           <label>Max call duration (s)<input name="max_call_seconds" type="number" min="10" value="${esc(x.max_call_seconds)}"></label>
         </div>
-        <label>Allowed callers <span class="hint">one per line or comma separated; empty = anyone</span><textarea name="allowed_callers" data-type="list" rows="2" placeholder="1001, 1002">${esc(x.allowed_callers.join('\n'))}</textarea></label>
+        <label>Allowed callers <span class="hint">one per line or comma separated. Empty = this is the phone's default bridge for everyone not listed on another bridge.</span><textarea name="allowed_callers" data-type="list" rows="2" placeholder="1005, 1006">${esc(x.allowed_callers.join('\n'))}</textarea></label>
+        <div class="callout small" id="route-hint"></div>
       </fieldset>
       <fieldset><legend>Audio</legend>
         <div class="row">
@@ -820,6 +834,15 @@ async function bridgeForm(b) {
     </form>`, body => {
     const form = $('#bridge-form', body);
     const syncMode = () => $$('[data-mode]', form).forEach(el => el.classList.toggle('hidden', el.dataset.mode !== form.mode.value));
+    const syncRoutes = () => {
+      const others = state.bridges.filter(o => o.phone_id === form.phone_id.value && o.id !== b?.id);
+      const hint = $('#route-hint', form);
+      hint.classList.toggle('hidden', !others.length);
+      hint.innerHTML = others.length ? `<b>This phone has other bridges.</b> Calls go to the bridge that lists the caller, otherwise to the default bridge (the one without allowed callers).
+        <div style="margin-top:6px">${others.map(o => `${esc(o.allowed_callers.length ? o.allowed_callers.join(', ') : 'default')} → ${esc(o.name || o.id)}`).join('<br>')}</div>` : '';
+    };
+    form.phone_id.onchange = syncRoutes;
+    syncRoutes();
     form.mode.onchange = syncMode; syncMode();
     const gate = $('#gate-on', form);
     const syncGate = () => { form.speaker_gate_db.disabled = !gate.checked; };

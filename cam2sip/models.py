@@ -158,6 +158,16 @@ class Bridge(BaseModel):
     hangup_digit: str = ""
     dtmf_actions: list[DtmfAction] = Field(default_factory=list)
 
+    @field_validator("allowed_callers")
+    @classmethod
+    def _callers(cls, v: list[str]) -> list[str]:
+        out: list[str] = []
+        for c in v:
+            c = c.strip()
+            if c and c not in out:
+                out.append(c)
+        return out
+
     @model_validator(mode="after")
     def _check_mode(self) -> "Bridge":
         if self.mode == "direct" and not self.camera_id:

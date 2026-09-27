@@ -74,5 +74,40 @@ class Store:
     def bridge(self, bid: str):
         return next((b for b in self.config.bridges if b.id == bid), None)
 
-    def bridge_for_phone(self, pid: str):
-        return next((b for b in self.config.bridges if b.phone_id == pid), None)
+    def bridges_for_phone(self, pid: str) -> list:
+        return [b for b in self.config.bridges if b.phone_id == pid]
+
+    def route_bridge(self, pid: str, caller: str):
+        """Pick the bridge for an incoming call to phone `pid` from `caller`.
+
+        A bridge whose allowed_callers lists the caller wins; otherwise the
+        phone's default bridge (empty allowed_callers) takes the call.
+        Returns (bridge, reason) or (None, reason).
+        """
+        bridges = [b for b in self.bridges_for_phone(pid) if b.enabled]
+        if not bridges:
+            return None, "no enabled bridge"
+        caller = caller.strip()
+        for b in bridges:
+            if caller and caller in b.allowed_callers:
+                return b, f"caller {caller} is listed"
+        for b in bridges:
+            if not b.allowed_callers:
+                return b, "default bridge"
+        return None, "caller not allowed"
+
+    def routing_conflict(self, bridge) -> str | None:
+        """Why `bridge` can't coexist with the phone's other enabled bridges (None if it can)."""
+        if not bridge.enabled:
+            return None
+        for other in self.bridges_for_phone(bridge.phone_id):
+            if other.id == bridge.id or not other.enabled:
+                continue
+            name = other.name or other.id
+            if not bridge.allowed_callers and not other.allowed_callers:
+                return (f"this phone already has a default bridge for all callers ('{name}'); "
+                        "list allowed callers on one of them")
+            overlap = sorted(set(bridge.allowed_callers) & set(other.allowed_callers))
+            if overlap:
+                return f"caller {', '.join(overlap)} is already routed to bridge '{name}'"
+        return None

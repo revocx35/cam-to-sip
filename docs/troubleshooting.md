@@ -16,7 +16,8 @@ Start with **Logs** in the web UI, or `docker logs -f cam2sip`. For SIP problems
 
 | Symptom | Cause / fix |
 |---|---|
-| Caller hears busy | the camera is already in a call (`486`), or the caller isn't in *Allowed callers* (`403`) |
+| Caller hears busy | the camera is already in a call (`486`), or no bridge of that phone accepts the caller (`403`: not listed and no default bridge) |
+| Caller lands on the wrong bridge | Check the phone's routing on the *Virtual phones* page. The caller ID must match exactly what the PBX sends (see the `call from … -> bridge …` log line) |
 | Caller hears "unavailable" | no enabled bridge for this phone, or camera disabled (`480`) |
 | Call connects, silence both ways | RTP blocked: allow UDP `16000-16199` from the PBX; check the *RTP* line in the dashboard's call card (packets in/out) |
 | Hear the camera, camera doesn't hear you | see *Speaker* below |

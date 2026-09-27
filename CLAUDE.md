@@ -84,6 +84,7 @@ Local test-environment details (PBX, camera, credentials, where it's deployed) l
 - Call notice invariant: while `CameraLink.notice_state` is `pending` or `playing`, camera mic audio is dropped (`_mic_audio`) and far-end audio is not sent to the speaker (`speak`). Owners must call `start_notice()` only when the call is connected. `tests/test_sounds_notice.py` fakes go2rtc by pulling the talk stream with `RtspAudioClient`, which is a handy pattern for speaker-path tests.
 - Sound uploads: the browser converts to 8 kHz WAV (`audioFileToWav` in app.js). The server only parses PCM WAV (stdlib `wave`), so there's no ffmpeg in the image. Upload bodies are raw WAV (no multipart and no python-multipart dependency).
 - Natural TTS: `media/piper.py` runs `python -m piper.http_server` (GPL-3.0, separate process) on 127.0.0.1:18556; voice ids are `piper:<key>`, downloaded from rhasspy/piper-voices into /data/voices. Tests must never download: `tests/conftest.py` makes the catalog unavailable by default (fake it per test).
+- Several bridges per phone: incoming calls are routed by caller in `Store.route_bridge()` (listed caller → default bridge → 403), and `Store.routing_conflict()` enforces unambiguous routing on save. Nothing may assume one bridge per phone.
 - Client-transaction lingering uses `loop.call_later`, not sleeping tasks. Sleeping tasks made every test take 32 s and slowed shutdown.
 
 ## Release

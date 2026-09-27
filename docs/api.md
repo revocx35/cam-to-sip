@@ -92,7 +92,7 @@ Camera object:
 | Method | Path | Description |
 |---|---|---|
 | GET | `/bridges` | list (`busy` = camera in a call) |
-| POST | `/bridges` | create (`409` if the phone is already bridged) |
+| POST | `/bridges` | create. A phone can have several bridges, and calls are routed by caller (see below). `409` if a caller is already listed on another enabled bridge of the same phone, or if the phone would get a second default bridge (empty `allowed_callers`) |
 | PUT | `/bridges/{id}` | update |
 | DELETE | `/bridges/{id}` | delete |
 | POST | `/bridges/{id}/call` | `{"target": "600", "camera_id": "…"}`: the camera calls a number or SIP URI → `{"call_id"}`. `camera_id` is optional (IVR bridges: which menu camera; default the first). `409` if the camera is busy or the phone isn't registered |
@@ -111,13 +111,15 @@ Camera object:
   "speaker_gain_db": 0,         // phone -> camera
   "speaker_gate_db": -50,       // null = gate off
   "max_call_seconds": 600,
-  "allowed_callers": ["1001"],  // empty = anyone
+  "allowed_callers": ["1001"],  // callers routed to this bridge; empty = the phone's default bridge
   "hangup_digit": "#",
   "dtmf_actions": [
     {"digit": "1", "method": "POST", "url": "http://ha:8123/api/webhook/open-gate", "body": "", "hangup": true}
   ]
 }
 ```
+
+**Routing:** an incoming call to a phone goes to the enabled bridge whose `allowed_callers` contains the caller ID. Otherwise it goes to the phone's bridge with an empty `allowed_callers` (the default). Otherwise it is rejected with `403`.
 
 IVR bridge (`mode: "ivr"`), in addition to the common fields above:
 

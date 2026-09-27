@@ -130,14 +130,16 @@ sequenceDiagram
     E->>G: close talk RTSP + POST dst with empty src (stop)
 ```
 
-Routing: the Request-URI user is the account's unique `contact_user` (`c2s-xxxxxxxx`), so several virtual phones can share one UDP port, even when they register to different PBXs. If that doesn't match, cam2sip falls back to the `To` user.
+Bridge selection: a phone can have several bridges. `Store.route_bridge(phone, caller)` picks the enabled bridge whose `allowed_callers` lists the caller (from P-Asserted-Identity or From). Otherwise it picks the phone's default bridge (empty list), or rejects the call with 403. `Store.routing_conflict()` keeps this unambiguous at save time: no caller on two enabled bridges of one phone, and at most one default per phone.
+
+Account routing: the Request-URI user is the account's unique `contact_user` (`c2s-xxxxxxxx`), so several virtual phones can share one UDP port, even when they register to different PBXs. If that doesn't match, cam2sip falls back to the `To` user.
 
 Rejections:
 
 | Condition | Response |
 |---|---|
 | No bridge, or bridge/camera disabled | `480 Temporarily Unavailable` |
-| Caller not on the whitelist | `403 Forbidden` |
+| No bridge of the phone accepts this caller (not listed, no default bridge) | `403 Forbidden` |
 | Camera already in a call | `486 Busy Here` |
 | No common codec | `488 Not Acceptable Here` |
 | Caller hangs up while ringing (CANCEL) | `487 Request Terminated` |

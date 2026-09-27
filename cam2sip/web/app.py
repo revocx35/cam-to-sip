@@ -395,16 +395,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"ok": True}
 
     # -- bridges --------------------------------------------------------------------------------
-    def check_bridge(b: Bridge, exclude: str | None = None) -> None:
+    def check_bridge(b: Bridge) -> None:
         check_sounds(b.sound_ids())
         for cid in b.camera_ids():
             if not store.camera(cid):
                 raise HTTPException(422, "camera_id: unknown camera")
         if not store.phone(b.phone_id):
             raise HTTPException(422, "phone_id: unknown phone")
-        other = next((x for x in cfg.bridges if x.phone_id == b.phone_id and x.id != exclude), None)
-        if other:
-            raise HTTPException(409, f"that phone is already bridged ('{other.name or other.id}')")
+        conflict = store.routing_conflict(b)
+        if conflict:
+            raise HTTPException(409, conflict)
 
     @app.get("/api/bridges")
     async def list_bridges():
@@ -423,7 +423,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def update_bridge(bid: str, payload: dict):
         old = find(cfg.bridges, bid)
         b = merge(Bridge, old, payload)
-        check_bridge(b, exclude=bid)
+        check_bridge(b)
         cfg.bridges[cfg.bridges.index(old)] = b
         await save_and_apply()
         return b.model_dump()

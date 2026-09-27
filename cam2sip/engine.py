@@ -592,18 +592,19 @@ class Engine:
 
     async def on_incoming(self, call: Call) -> None:
         phone = self._phone_for_account(call.account.cfg.id)
-        bridge = self.store.bridge_for_phone(phone.id) if phone else None
         who = call.remote_user or "unknown"
-        if not bridge or not bridge.enabled:
-            log.info("call from %s to %s rejected: no active bridge", who, call.account.cfg.username)
-            call.reject(480, "Temporarily Unavailable")
-            self._record(call, bridge)
+        ext = call.account.cfg.username
+        bridge, why = self.store.route_bridge(phone.id, who) if phone else (None, "unknown phone")
+        if not bridge:
+            if why == "caller not allowed":
+                log.info("call from %s to %s rejected: no bridge accepts this caller", who, ext)
+                call.reject(403, "Forbidden")
+            else:
+                log.info("call from %s to %s rejected: %s", who, ext, why)
+                call.reject(480, "Temporarily Unavailable")
+            self._record(call, None)
             return
-        if bridge.allowed_callers and who not in bridge.allowed_callers:
-            log.info("call from %s rejected: caller not allowed on bridge %s", who, bridge.name)
-            call.reject(403, "Forbidden")
-            self._record(call, bridge)
-            return
+        log.info("call from %s to %s -> bridge '%s' (%s)", who, ext, bridge.name or bridge.id, why)
         camera = None
         if bridge.mode == "direct":
             camera = self.store.camera(bridge.camera_id)

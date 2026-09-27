@@ -34,7 +34,7 @@ Runs as a small Docker Compose stack with a web UI for configuration.
   - **TP-Link Tapo** (C2xx and others) using Tapo's own talk-back protocol,
   - **ONVIF Profile T** cameras with an RTSP audio backchannel (Hikvision, Dahua, Reolink, Amcrest…),
   - **any go2rtc source** (`rtsp://`, `tapo://`, `dvrip://`, `exec:` backchannels, …).
-- **Bridges** link one camera to one phone, with auto-answer after N rings, mic/speaker gain, a noise gate, a caller whitelist and a max call duration.
+- **Bridges** link a phone to a camera (or to an IVR menu of cameras), with auto-answer after N rings, mic/speaker gain, a noise gate, a caller list and a max call duration. **One phone can have several bridges**, chosen by caller ID (e.g. 1005 gets the IVR menu, 1006 goes straight to a camera).
 - **Outbound "doorbell" calls**: the camera calls an extension or ring group, from the UI or the REST API (Home Assistant, Frigate, Node-RED…).
 - **IVR camera menu**: one virtual phone can serve several cameras. Callers hear a spoken menu (*"Press 1 for Front door. Press 2 for Garage."*), press a digit, and can press `*` during the call to switch.
 - **Natural voices**: offline neural text-to-speech (Piper) in about 40 languages, downloaded on demand, with espeak-ng (100+ languages) as fallback.
@@ -158,6 +158,24 @@ go2rtc and the talk server listen on `127.0.0.1` only, so the stack can run next
 | Hang-up digit / DTMF actions | A digit ends the call and/or fires an HTTP request. |
 
 A camera can only be in one call at a time; a second caller gets `486 Busy Here`.
+
+### Several bridges on one phone (routing by caller)
+
+A virtual phone can have **several bridges**. Each incoming call goes to:
+
+1. the bridge whose **Allowed callers** list contains the caller's number, otherwise
+2. the phone's **default bridge**, the one with an empty *Allowed callers* list, otherwise
+3. nowhere: the call is rejected (`403`).
+
+Example on extension 1008:
+
+| Bridge | Allowed callers | Result |
+|---|---|---|
+| "Menu" (IVR: 1 Front door, 2 Garage) | `1005` | 1005 hears the camera menu |
+| "Garage" (direct) | `1006` | 1006 is connected straight to the garage camera |
+| "Front door" (direct) | *(empty)* | everyone else goes to the front door (optional; without it others are rejected) |
+
+The same caller can't be listed on two enabled bridges of one phone, and a phone can have only one default bridge. The bridge form and the *Virtual phones* page show each phone's routing. Calls through different bridges can run at the same time, as long as they use different cameras.
 
 ### IVR: one phone, several cameras
 
