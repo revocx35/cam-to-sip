@@ -30,6 +30,10 @@ class Camera(BaseModel):
     listen_url: str = ""            # custom: any go2rtc source for the microphone
     talk_url: str = ""              # custom: any go2rtc source with a backchannel
     mic_with_video: bool = True     # request video with audio (Tapo only sends audio then)
+    # adaptive mic gain: lifts quiet (distant) speech towards a target level
+    mic_agc: bool = False
+    mic_agc_target_db: float = Field(default=-20.0, ge=-40, le=-6)
+    mic_agc_max_gain_db: float = Field(default=24.0, ge=0, le=30)
     # privacy: announce on the camera speaker when a call starts (mic muted until done)
     notify_enabled: bool = False
     notify_text: str = "Attention please. A call has started on this camera."

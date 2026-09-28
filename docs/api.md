@@ -21,7 +21,7 @@ Secret fields (`password`, `cloud_password`) are never returned. Responses conta
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/status` | go2rtc state, per-phone registration, active calls with media stats, busy cameras |
+| GET | `/status` | go2rtc state, per-phone registration, active calls with media stats (`media.mic.agc_gain_db`: current adaptive boost, `null` when off), busy cameras |
 | GET | `/logs?after=<seq>` | log records newer than `seq` (ring buffer, ~1500 entries) |
 | GET | `/calls` | `{"active": [...], "history": [...]}` (last 200 calls) |
 | POST | `/calls/{call_id}/hangup` | hang up an active call |
@@ -58,6 +58,9 @@ Camera object:
   "listen_url": "",             // custom only: go2rtc source for the mic
   "talk_url": "",               // custom only: go2rtc source for the speaker
   "mic_with_video": true,
+  "mic_agc": false,             // adaptive mic gain (lifts quiet, distant speech)
+  "mic_agc_target_db": -20,     // -40 .. -6 dBFS
+  "mic_agc_max_gain_db": 24,    // 0 .. 30 dB
   "notify_enabled": false,      // privacy call notice on the camera speaker
   "notify_text": "Attention please. A call has started on this camera.",
   "notify_sound": "",           // uploaded sound id; overrides notify_text

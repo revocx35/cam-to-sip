@@ -41,7 +41,7 @@ Local test-environment details (PBX, camera, credentials, where it's deployed) l
 ## Layout
 
 - `cam2sip/sip/`: own SIP stack. `message.py` parses/builds, `auth.py` does digest, `sdp.py` handles SDP, `stack.py` has UDP + transactions, `ua.py` has accounts + calls.
-- `cam2sip/media/`: `g711.py` (tables), `rtp.py` (RTP socket, `Pacer` jitter buffer), `rtsp.py` (mic client + talk server for go2rtc).
+- `cam2sip/media/`: `g711.py` (tables, level/peak/zero-crossing helpers), `rtp.py` (RTP socket, `Pacer` jitter buffer), `rtsp.py` (mic client + talk server for go2rtc), `agc.py` (adaptive mic gain, applied in `CameraLink._mic_audio`).
 - `cam2sip/engine.py`: `Engine` (config → go2rtc streams + SIP accounts, call routing), `CameraLink` (camera side of any call: mic, speaker, gate, keep-alive) and `BridgeSession` (SIP call ↔ CameraLink, plus the IVR menu phases: menu ↔ connected).
 - `cam2sip/media/tts.py` (espeak-ng prompts) and `media/dtmf.py` (in-band Goertzel detector) serve the IVR.
 - `cam2sip/sounds.py`: uploaded sounds (`SoundLibrary`). `Engine.prompt_pcm()` picks the uploaded sound or TTS for any prompt; `CameraLink` plays the camera's privacy call notice (`start_notice()`, `mic_open`).
@@ -94,6 +94,7 @@ Local test-environment details (PBX, camera, credentials, where it's deployed) l
 - Client-transaction lingering uses `loop.call_later`, not sleeping tasks. Sleeping tasks made every test take 32 s and slowed shutdown.
 - **Client IPs:** uvicorn's proxy-header handling is off (`proxy_headers=False` on both listeners); the app wraps itself in `ProxyHeadersMiddleware` with `CAM2SIP_TRUSTED_PROXIES`. Never use `forwarded_allow_ips="*"`: it makes the left-most, client-supplied `X-Forwarded-For` entry the client IP, which defeats the login throttle (`auth.LoginThrottle`).
 - Tests pick the client address with `TestClient(app, client=(ip, port))`. The proxy middleware is inside the app, so tests cover `X-Forwarded-For` handling; `172.17.0.2` (Docker bridge) is trusted by the default `private` setting, a public address isn't.
+- **Adaptive mic gain (`media/agc.py`) is tuned on real audio, not just tones.** The live C212 room showed that clicks/clinks pass a pure level+duration speech test and got +8 dB, and a steady fan fools any noise-floor tracker until it catches up. Hence the voicing check (< 3000 zero crossings/s; measured: vowels 1000–2600, room hiss ~2900, clicks 3700+) and the syllable rule (the gain rises only after 50 ms–1.5 s of voice ≥ 10 dB above the floor that is followed by a 6 dB dip). `tests/test_agc.py` has click, fan and espeak-speech cases. Mutating either rule makes them fail. Replay recordings (`/api/cameras/{id}/mic.wav` is unprocessed) through `Agc` to check changes.
 - `SECURE_COOKIES=auto` marks the cookie `Secure` only for HTTPS reported by a trusted proxy, not for the direct :8443 listener: browsers don't let an `http://` page overwrite a `Secure` cookie, so it would break sign-in on :8090 for the same host.
 
 ## Release

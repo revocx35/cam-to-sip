@@ -81,12 +81,25 @@ Type **Custom go2rtc source** accepts anything [go2rtc supports](https://github.
 
 The speaker source must expose a `sendonly` audio track in go2rtc's probe (that is the backchannel). **Test connection** tells you.
 
+## Microphone volume (adaptive gain)
+
+Camera microphones are tuned for people close by, so someone at the far end of a garden or room can come through at −45 dBFS or less, barely audible on a phone. **Microphone volume → Adaptive gain** in the camera form fixes that:
+
+- Speech is lifted towards the **target level** (default −20 dBFS), up to the **max boost** (default +24 dB).
+- Only voice moves the gain: voiced syllables clearly above the noise floor, followed by a pause. Fans, rain, clicks and knocks don't.
+- It holds in pauses, never goes below 0 dB and never clips. It freezes while the camera speaker plays, because echo-cancelling cameras (Tapo) duck the mic then.
+- It works for every call type (SIP, IVR, doorbell, browser). A bridge's fixed *mic gain* is applied on top of it.
+
+The dashboard shows the current boost during a call (*adaptive gain +18 dB*). Measured on a Tapo C212 in a quiet room: room noise about −60 dBFS stays untouched until someone speaks. A voice at about −46 dBFS was raised by +17 dB within 0.3 s and +18 dB within 0.5 s.
+
+The trade-off: while the boost is up, the room's background noise is raised by the same amount (−60 dBFS becomes about −40 dBFS at +20 dB). If that hiss bothers you, lower *Max boost*.
+
 ## Diagnostics from the UI
 
 | Button | What it does |
 |---|---|
 | **Call** | opens a browser call: live video, camera audio, push-to-talk (see the README's *Browser calls*) |
 | **Check** | probes mic and speaker through go2rtc and shows the codecs |
-| **Listen 4s** | records 4 s from the camera mic and plays it in your browser |
+| **Listen 4s** | records 4 s from the camera mic and plays it in your browser (unprocessed: without adaptive gain) |
 | **Test speaker** | plays a two-tone chime through the camera speaker, over the same path calls use |
 | Snapshot | live JPEG from go2rtc (needs video in the mic source) |

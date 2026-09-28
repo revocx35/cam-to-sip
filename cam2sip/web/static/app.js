@@ -298,6 +298,8 @@ window.addEventListener('beforeunload', () => { if (pageCleanup) pageCleanup(); 
 window.addEventListener('hashchange', route);
 
 /* ---------- dashboard ---------- */
+const agcText = mic => typeof mic.agc_gain_db === 'number' ? ` · adaptive gain +${mic.agc_gain_db} dB` : '';
+
 function callCard(c) {
   const dur = c.answered_at ? fmtDur(Date.now() / 1000 - c.answered_at) : '';
   const m = c.media || {};
@@ -311,7 +313,7 @@ function callCard(c) {
       <dt>Codec</dt><dd>${esc(c.codec || '-')}</dd>
       ${m.phase === 'menu' ? `<dt>IVR</dt><dd>${badge('caller is in the menu', 'info')}</dd>` : ''}
       ${m.notice === 'pending' || m.notice === 'playing' ? `<dt>Call notice</dt><dd>${badge(m.notice === 'playing' ? 'announcing on camera' : 'waiting for speaker', 'warn')}</dd>` : ''}
-      <dt>Camera mic</dt><dd>${m.phase === 'menu' ? badge('-', '', true) : mic.muted ? badge('muted until notice ends', 'warn') : mic.connected ? badge(`live ${mic.codec || ''} · buffer ${mic.buffer_ms}ms`, 'ok') : badge(mic.error || 'connecting', mic.error ? 'bad' : 'warn')}</dd>
+      <dt>Camera mic</dt><dd>${m.phase === 'menu' ? badge('-', '', true) : mic.muted ? badge('muted until notice ends', 'warn') : mic.connected ? badge(`live ${mic.codec || ''} · buffer ${mic.buffer_ms}ms${agcText(mic)}`, 'ok') : badge(mic.error || 'connecting', mic.error ? 'bad' : 'warn')}</dd>
       <dt>Camera speaker</dt><dd>${spk.state === 'connected' ? badge(spk.gate_open ? 'talking' : 'connected', spk.gate_open ? 'info' : 'ok') : badge(spk.state || 'n/a', spk.state === 'error' ? 'bad' : '')}</dd>
       <dt>${c.direction === 'web' ? 'Frames' : 'RTP'}</dt><dd class="mono">${c.rtp.rx_packets} in / ${c.rtp.tx_packets} out ${c.rtp.remote ? '· ' + esc(c.rtp.remote) : ''}</dd>
     </dl>
@@ -390,6 +392,7 @@ function camCaps(c) {
   if (!c.enabled) out.push(badge('disabled'));
   if (c.busy) out.push(badge('in call', 'info'));
   if (c.notify_enabled) out.push(badge('call notice', 'info'));
+  if (c.mic_agc) out.push(badge('adaptive gain', 'info'));
   if (p) {
     out.push(p.mic ? badge(`mic ${p.mic}`, 'ok') : badge('no mic', 'bad'));
     out.push(p.speaker ? badge(`speaker ${p.speaker}`, 'ok') : badge('no speaker', 'warn'));
@@ -499,6 +502,14 @@ async function cameraForm(cam) {
         <label>Microphone source<input name="listen_url" value="${esc(c.listen_url)}" placeholder="rtsp://user:pass@192.168.1.50:554/stream"></label>
         <label>Speaker (backchannel) source<input name="talk_url" value="${esc(c.talk_url)}" placeholder="rtsp://user:pass@192.168.1.50:554/stream"></label>
       </div>
+      <fieldset><legend>Microphone volume</legend>
+        <label class="check"><input type="checkbox" name="mic_agc" ${c.mic_agc ? 'checked' : ''}> Adaptive gain: boost quiet voices, e.g. someone far from the camera</label>
+        <p class="hint muted small" style="margin:-4px 0 10px">During calls, speech is lifted towards the target level, up to the max boost. The gain only changes while someone is talking, holds in pauses, never makes the camera quieter and never clips. Applies to phone and browser calls; a bridge's mic gain is added on top.</p>
+        <div class="row">
+          <label>Target level (dBFS)<input name="mic_agc_target_db" type="number" min="-40" max="-6" step="1" value="${esc(c.mic_agc_target_db ?? -20)}"><span class="hint">Higher is louder. -20 suits most phones.</span></label>
+          <label>Max boost (dB)<input name="mic_agc_max_gain_db" type="number" min="0" max="30" step="1" value="${esc(c.mic_agc_max_gain_db ?? 24)}"><span class="hint">Room noise is raised by the same amount. Lower it if calls hiss.</span></label>
+        </div>
+      </fieldset>
       <fieldset><legend>Call notice (privacy)</legend>
         <label class="check"><input type="checkbox" name="notify_enabled" ${c.notify_enabled ? 'checked' : ''}> Announce on the camera speaker when a call starts</label>
         <p class="hint muted small" style="margin:-4px 0 10px">Plays before any audio is shared. The camera microphone stays muted until it has finished, and the caller hears it too. Needs the camera speaker.</p>
@@ -1026,7 +1037,7 @@ pages.call = async id => {
       $('#call-stats').innerHTML = `
         ${m.phase === 'menu' ? `<dt>IVR</dt><dd>${badge('caller is in the menu', 'info')}</dd>` : ''}
       ${m.notice === 'pending' || m.notice === 'playing' ? `<dt>Call notice</dt><dd>${badge(m.notice === 'playing' ? 'announcing on camera' : 'waiting for speaker', 'warn')}</dd>` : ''}
-      <dt>Camera mic</dt><dd>${m.phase === 'menu' ? badge('-', '', true) : mic.muted ? badge('muted until notice ends', 'warn') : mic.connected ? badge(`live ${mic.codec || ''}`, 'ok') : badge(mic.error || 'connecting', mic.error ? 'bad' : 'warn')}</dd>
+      <dt>Camera mic</dt><dd>${m.phase === 'menu' ? badge('-', '', true) : mic.muted ? badge('muted until notice ends', 'warn') : mic.connected ? badge(`live ${mic.codec || ''}${agcText(mic)}`, 'ok') : badge(mic.error || 'connecting', mic.error ? 'bad' : 'warn')}</dd>
         <dt>Camera speaker</dt><dd>${spk.state === 'connected' ? badge(spk.gate_open ? 'talking' : 'connected', spk.gate_open ? 'info' : 'ok') : badge(spk.state === 'none' ? 'not available' : spk.state, spk.state === 'error' ? 'bad' : '')}</dd>`;
       if (spk.state === 'none') { ptt.disabled = openMic.disabled = true; ptt.querySelector('.ptt-label').textContent = 'No speaker'; }
     },

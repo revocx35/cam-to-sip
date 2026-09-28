@@ -38,6 +38,7 @@ Runs as a small Docker Compose stack with a web UI for configuration.
 - **Outbound "doorbell" calls**: the camera calls an extension or ring group, from the UI or the REST API (Home Assistant, Frigate, Node-RED…).
 - **IVR camera menu**: one virtual phone can serve several cameras. Callers hear a spoken menu (*"Press 1 for Front door. Press 2 for Garage."*), press a digit, and can press `*` during the call to switch.
 - **Natural voices**: offline neural text-to-speech (Piper) in about 40 languages, downloaded on demand, with espeak-ng (100+ languages) as fallback.
+- **Adaptive mic gain**: per camera, quiet voices (someone far from the camera) are lifted to a normal phone level. It reacts to speech only, so room noise, clicks and fans don't pump it up, and it never clips.
 - **Call notice (privacy)**: per camera, announce *"A call has started on this camera"* (your own text, or an uploaded recording) on the camera speaker when any call connects. The camera mic stays muted until it has played.
 - **Uploaded sounds**: use your own recordings (MP3, WAV, OGG, M4A…) for IVR prompts and call notices instead of text-to-speech.
 - **Browser calls**: click *Call* on a camera to get live video plus two-way audio in the browser, with push-to-talk (button or space bar) or hands-free open mic. No SIP phone needed.
@@ -154,7 +155,7 @@ go2rtc and the talk server listen on `127.0.0.1` only, so the stack can run next
 | Ring before answering | Seconds of ringing before auto-answer (0 = immediately). The camera audio connects while it rings, so audio starts instantly. |
 | Max call duration | Hard limit, then cam2sip hangs up. |
 | Allowed callers | Caller IDs allowed to call in; others get `403`. Empty = anyone. |
-| Mic / speaker gain | dB gain for each direction. |
+| Mic / speaker gain | Fixed dB gain for each direction. For voices that come and go (near/far from the camera) use the camera's *adaptive gain* instead; the bridge's mic gain is added on top of it. |
 | Noise gate | Phone audio below the threshold (dBFS) isn't sent to the camera. Many cameras (Tapo included) **mute their microphone while the speaker plays** (echo cancellation), so gating the line's background noise keeps you able to hear the camera between sentences. |
 | Hang-up digit / DTMF actions | A digit ends the call and/or fires an HTTP request. |
 
@@ -191,6 +192,24 @@ In **Bridges → New bridge**, set *When the phone is called* to **Play a menu t
 - **Voice / language**: any espeak-ng voice, e.g. `en-us`, `en-gb`, `de`, `fr`, `tr`. Write the prompt texts in the same language, and use **Preview menu** to hear it in the browser.
 - DTMF works with RFC 4733 telephone-events (the FreePBX default), SIP INFO, and in-band tones as a fallback.
 - Doorbell calls from an IVR bridge (**Call…**/API) connect straight to one of its cameras (`camera_id` in the API).
+
+### Adaptive mic gain (distant voices)
+
+Someone standing far from a camera is often hard to hear on the phone. In a camera's settings, **Microphone volume → Adaptive gain** lifts quiet speech towards a normal level during every call to that camera (SIP, IVR, doorbell and browser calls):
+
+| Setting | Default | Meaning |
+|---|---|---|
+| Adaptive gain | off | Turn it on per camera. |
+| Target level | −20 dBFS | How loud speech should end up. Higher is louder. |
+| Max boost | +24 dB | The most it will amplify. Room noise is raised by the same amount while the boost is up, so lower it if calls hiss. |
+
+How it behaves:
+
+- It **listens for speech**. The gain rises only after syllable-like sounds (voiced, clearly above the room's noise floor, followed by a short pause). Steady noise such as a fan, rain or hum, and clicks or knocks, don't raise it.
+- It reaches full boost within about half a second to a second of speech, **holds in pauses** (no pumping between sentences) and drops at once when someone comes close and speaks loudly.
+- It **never makes the camera quieter** than it is (0 dB minimum) and limits peaks to −1 dBFS, so it can't clip.
+- While the camera's speaker is playing it **freezes**, because echo-cancelling cameras (Tapo) turn their microphone down then.
+- The dashboard and the browser call show the current boost (*adaptive gain +18 dB*). *Listen 4s* records the unprocessed microphone.
 
 ### Call notice (privacy)
 

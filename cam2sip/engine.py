@@ -12,6 +12,7 @@ import httpx
 
 from .go2rtc import Go2rtc, summarize_probe
 from .media import g711, tts
+from .media.agc import Agc
 from .media.dtmf import DtmfDetector
 from .media.rtp import Pacer, PortAllocator, RtpPacket
 from .media.rtsp import RtspAudioClient, TalkServer
@@ -27,6 +28,7 @@ log = logging.getLogger("cam2sip.engine")
 DTMF_EVENTS = "0123456789*#ABCD"
 RTP_TIMEOUT = 60.0
 OUTBOUND_RING_TIMEOUT = 60.0
+AGC_ECHO_TAIL = 0.5      # the camera keeps playing (and ducking its mic) a little after our gate closes
 
 
 class CameraBusy(Exception):
@@ -58,6 +60,7 @@ class CameraLink:
         # privacy notice: the microphone stays closed until the notice has played
         self.notice_state = "pending" if camera.notify_enabled else "none"
         self.mic_open = not camera.notify_enabled
+        self.agc = Agc(camera.mic_agc_target_db, camera.mic_agc_max_gain_db) if camera.mic_agc else None
 
     def start(self) -> None:
         cam = self.camera
@@ -82,8 +85,13 @@ class CameraLink:
         return time.monotonic() < self._gate_open_until
 
     def _mic_audio(self, codec: str, payload: bytes) -> None:
-        if self.mic_open:
-            self.on_mic(codec, payload)
+        if not self.mic_open:
+            return
+        if self.agc:
+            # echo-cancelling cameras duck the mic while their speaker plays: don't adapt to that
+            hold = time.monotonic() < self._gate_open_until + AGC_ECHO_TAIL
+            payload = self.agc.process(payload, codec, hold)
+        self.on_mic(codec, payload)
 
     # -- privacy notice ----------------------------------------------------------------
     def start_notice(self) -> None:
@@ -182,6 +190,7 @@ class CameraLink:
                 "codec": self.mic.codec if self.mic else None,
                 "error": self.mic.error if self.mic else None,
                 "muted": not self.mic_open,
+                "agc_gain_db": round(self.agc.gain_db, 1) if self.agc else None,
             },
             "notice": self.notice_state,
             "speaker": {

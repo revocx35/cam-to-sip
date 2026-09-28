@@ -83,9 +83,14 @@ DECODE = {
 }
 ENCODE = {"PCMA": linear_to_alaw, "PCMU": linear_to_ulaw}
 _SQUARES = {k: [v * v for v in table] for k, table in DECODE.items()}
+# peak detection without a Python loop: translate each byte to the rank of its
+# magnitude, take max() of that, look the magnitude back up
+_MAGNITUDES = {k: sorted({abs(v) for v in table}) for k, table in DECODE.items()}
+_MAG_RANK = {k: bytes(_MAGNITUDES[k].index(abs(v)) for v in table) for k, table in DECODE.items()}
+_SIGN = {k: bytes(v < 0 for v in table) for k, table in DECODE.items()}
 
 
-@lru_cache(maxsize=128)
+@lru_cache(maxsize=512)
 def translate_table(src: str, dst: str, gain_db: float = 0.0) -> bytes | None:
     """Table converting `src` codec bytes to `dst` codec bytes with a gain.
 
@@ -119,11 +124,24 @@ def level_dbfs(payload: bytes, codec: str) -> float:
     """RMS level of a G.711 frame in dBFS (-96 for digital silence)."""
     if not payload:
         return -96.0
-    sq = _SQUARES[codec]
-    mean = sum(sq[b] for b in payload) / len(payload)
+    mean = sum(map(_SQUARES[codec].__getitem__, payload)) / len(payload)
     if mean <= 0:
         return -96.0
     return max(-96.0, 10 * math.log10(mean / (32768.0 * 32768.0)))
+
+
+def peak_dbfs(payload: bytes, codec: str) -> float:
+    """Largest sample magnitude of a G.711 frame in dBFS (-96 for digital silence)."""
+    if not payload:
+        return -96.0
+    peak = _MAGNITUDES[codec][max(payload.translate(_MAG_RANK[codec]))]
+    return max(-96.0, 20 * math.log10(peak / 32768.0)) if peak else -96.0
+
+
+def crossings(payload: bytes, codec: str) -> int:
+    """Number of zero crossings (sign changes) in a G.711 frame, without a Python loop."""
+    signs = payload.translate(_SIGN[codec])     # one 0/1 byte per sample
+    return (int.from_bytes(signs[1:], "big") ^ int.from_bytes(signs[:-1], "big")).bit_count()
 
 
 def silence(codec: str, nbytes: int = 160) -> bytes:

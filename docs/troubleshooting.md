@@ -36,6 +36,13 @@ Start with **Logs** in the web UI, or `docker logs -f cam2sip`. For SIP problems
    - the camera's microphone is disabled in its app.
 2. **Check** should show `mic PCMA/8000` (or PCMU). If it shows something else (AAC), go2rtc transcodes via ffmpeg, which is fine but adds latency.
 
+| Symptom | Fix |
+|---|---|
+| People far from the camera are too quiet | Camera → *Microphone volume* → enable **Adaptive gain**. Raise *Max boost* (up to 30 dB) if they're still quiet |
+| Everyone is too quiet, near or far | Raise the target level, or add fixed *mic gain* on the bridge |
+| Hiss / room noise after someone spoke | The adaptive boost holds between sentences, and raises the room noise with it. Lower *Max boost* |
+| The adaptive boost stays at +0 dB | It only reacts to speech: voiced syllables at least ~10 dB above the room noise. Steady noise, clicks and music don't count, and it freezes while the camera speaker plays. The dashboard shows the current boost |
+
 ## Speaker (phone → camera)
 
 1. Cameras page → **Test speaker** plays a chime.

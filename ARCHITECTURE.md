@@ -76,6 +76,7 @@ cam2sip/
     g711.py          A-law/mu-law tables, translate+gain tables, level meter, tone, WAV
     rtp.py           RTP packets, port allocator, RtpEndpoint (socket), Pacer (jitter buffer)
     rtsp.py          RtspAudioClient (pull mic from go2rtc), TalkServer/TalkSession (serve speaker audio)
+    agc.py           Agc: adaptive mic gain (speech-gated, syllable detection, peak limit)
     tts.py           prompt synthesis: Piper ("piper:<voice>") or espeak-ng -> 8 kHz (resample, normalise, cache)
     piper.py         PiperEngine: Piper HTTP server process, voice catalog, voice downloads
     dtmf.py          Goertzel in-band DTMF detector (fallback when telephone-event isn't negotiated)
@@ -216,7 +217,9 @@ All audio is **G.711 at 8 kHz** (A-law or μ-law). Each G.711 byte is one sample
 camera ──RTSP──► go2rtc ──RTSP/TCP interleaved──► RtspAudioClient
                                                    │  (payload bytes, PCMA/PCMU)
                                                    ▼
-                                    g711.convert(cam codec → call codec, mic gain)
+                                    CameraLink: notice mute, Agc (adaptive gain, if the camera has it)
+                                                   ▼
+                                    g711.convert(cam codec → call codec, bridge mic gain)
                                                    ▼
                                     Pacer (adaptive jitter buffer, 20 ms clock)
                                                    ▼
@@ -234,6 +237,18 @@ camera ──RTSP──► go2rtc ──RTSP/TCP interleaved──► RtspAudioC
 
   Typical latency added: ~150 ms.
 - The mic stream in go2rtc has a second source, `ffmpeg:c2s_<cam>#audio=pcma`. go2rtc only starts that ffmpeg transcoder if the camera's native codec isn't G.711 (e.g. AAC).
+
+### Adaptive mic gain (`media/agc.py`)
+
+With `Camera.mic_agc`, `CameraLink._mic_audio()` passes every mic chunk through an `Agc` (one per link, so each call starts at 0 dB). It sits in `CameraLink`, so SIP, IVR, doorbell and browser calls all get it. Prompts and the call notice are fed to `on_mic` directly and bypass it.
+
+- **Blocks.** Chunks are cut into 20 ms blocks. Each block gets one gain (quantised to 0.5 dB, so `translate_table` stays cached) applied with `g711.convert`. Level (`level_dbfs`), peak (`peak_dbfs`) and zero crossings (`crossings`) are computed with `bytes.translate`, `map`/`max` and `int.bit_count()`: no per-sample Python loop, ~50 µs per 128 ms Tapo chunk.
+- **Voice blocks** are ≥ 6 dB above a noise floor (falls fast, rises 2 dB/s) and voiced: < 3000 zero crossings/s. On a Tapo C212, vowels measured 1000–2600/s, room hiss ~2900/s and clicks or clinks 3700+/s.
+- **Syllables raise the gain.** A run of voice blocks counts only if it lasts 50 ms–1.5 s, is ≥ 10 dB above the floor, and is followed within 0.25 s by a dip ≥ 6 dB below its level. The speech level (per syllable: fast attack, 0.5 s release) then sets `want = clamp(target − speech, 0, max_gain)`, and the gain moves towards it (rise τ 0.25 s, fall τ 0.1 s). Without the syllable rule, a fan switching on 10 dB above the room was taken for a voice while the floor caught up, and got +23 dB. A floor that tracked the minimum over the last second instead pumped plain room noise by 3.5 dB.
+- **Falling is immediate.** A voice block more than 6 dB above the target lowers the gain at once. Every block is also limited to a −1 dBFS peak, and the gain is never negative.
+- **Pauses hold** the gain. It doesn't decay, so the next sentence starts at full level; the cost is room noise raised by the same gain between sentences (the max boost caps it).
+- **Echo freeze.** While the speaker gate is open (plus 0.5 s, `AGC_ECHO_TAIL`), `hold=True` stops adaptation. Tapo ducks its mic ~10 dB while playing, and chasing that would blast the caller when playback ends.
+- `link.info()["mic"]["agc_gain_db"]` exposes the adapted gain (the dashboard and the browser call show it).
 
 ### Phone → camera (uplink)
 
@@ -264,6 +279,7 @@ RFC 4733 telephone-events (deduplicated per RTP timestamp) and SIP INFO (`applic
 - the `RtspAudioClient` (mic),
 - the `TalkSession` and the go2rtc play/re-attach loop (speaker),
 - the noise gate (`speak(payload, codec, gain, gate)`),
+- the adaptive mic gain (`Agc`, when `Camera.mic_agc` is on),
 - the 1 s silence keep-alive.
 
 `BridgeSession` (SIP) and `WebCall` (browser) are thin adapters around it.
