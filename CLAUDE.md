@@ -100,3 +100,10 @@ Local test-environment details (PBX, camera, credentials, where it's deployed) l
 ## Release
 
 Pushes to `main` run CI (pytest) and build a multi-arch image to `ghcr.io/revocx35/cam-to-sip` (`latest`, `sha-…`, and semver tags for `v*` tags). `docker-compose.yml` has both `build: .` and that image name.
+
+## telerouter integration (v1.7.0)
+
+`cam2sip/integration.py` (token auth, camera targets, one-time call tickets) + `Engine._integration_call`.
+The integration API is HTTPS only (`request.url.scheme`), skips the admin-session middleware and checks its
+own token (SHA-256 in `Settings.integration_token_hash`). Keep docs/integration-api.md identical to
+telerouter's copy. Tests: `tests/test_integration.py`.

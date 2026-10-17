@@ -207,6 +207,14 @@ Piper (GPL-3.0) is only ever run as a separate program over HTTP, like espeak-ng
 
 The BridgeSession starts at dial time, so camera audio is ready when the callee answers. Unanswered calls are CANCELled after 60 s.
 
+### Integration calls (telerouter, `integration.py`)
+
+telerouter asks `POST /api/integration/v1/calls {"target": <camera id>}` (HTTPS only, its own token, SHA-256
+stored in `Settings.integration_token_hash`) and gets a one-time `sip:tr<128-bit>@cam2sip:5062` (single use,
+30 s, bound to the caller's IP). `UserAgent.direct_resolver` turns that user part into a transient,
+non-registering account; `Engine._integration_call` answers it as a direct bridge to the camera
+(`Bridge(id="integration")`). Details: [docs/integration-api.md](docs/integration-api.md).
+
 ## 4. Media pipeline
 
 All audio is **G.711 at 8 kHz** (A-law or μ-law). Each G.711 byte is one sample, so converting between A-law and μ-law and applying a gain is a single `bytes.translate()` with a cached 256-byte table (`g711.translate_table`). No per-sample Python loops run on the hot path.

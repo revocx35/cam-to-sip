@@ -281,6 +281,18 @@ rest_command:
 
 Trigger it from a doorbell button, a Frigate `person` event, and so on. The full API is described in [docs/api.md](docs/api.md) and served live at `http://<server>:8090/api/docs`.
 
+## telerouter
+
+[telerouter](https://github.com/revocx35/telerouter) (an agentic smart-speaker manager and voice router)
+can call your cameras directly, without a PBX extension in between ("hey Jarvis, call the front door").
+
+1. **Settings → Integrations → Create token** (shown once; it reaches only the integration API).
+2. In telerouter: **Connections → Add cam2sip**, URL `https://<cam2sip-host>:8443`, the token, and pin the
+   certificate (its SHA-256 is shown on the same Settings card).
+
+telerouter asks for a one-time SIP address per call and sends its INVITE there; the camera is connected
+like a direct bridge (privacy notice included). API: [docs/integration-api.md](docs/integration-api.md).
+
 ## Documentation
 
 | Document | Contents |
