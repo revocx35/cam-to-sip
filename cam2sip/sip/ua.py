@@ -655,6 +655,8 @@ class UserAgent:
         self.accounts: dict[str, Account] = {}
         self.calls: dict[tuple[str, str], Call] = {}
         self.on_incoming: IncomingHandler | None = None
+        # resolves INVITEs to addresses no registered account owns (one-time integration call tickets)
+        self.direct_resolver: Callable[[str], Account | None] | None = None
         self._pending: dict[str, Call] = {}   # INVITE branch -> ringing inbound call
         self.stack.request_handler = self._on_request
         self.stack.cancel_handler = self._on_cancel
@@ -697,7 +699,11 @@ class UserAgent:
         except Exception:
             to_user = None
         matches = [a for a in self.accounts.values() if to_user and a.cfg.username == to_user]
-        return matches[0] if len(matches) == 1 else None
+        if len(matches) == 1:
+            return matches[0]
+        if ruser and self.direct_resolver:
+            return self.direct_resolver(ruser)
+        return None
 
     # -- calls ------------------------------------------------------------------------------------
     def register_call(self, call: Call) -> None:

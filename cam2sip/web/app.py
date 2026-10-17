@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import secrets
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -21,7 +22,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from .. import onvif
+from .. import integration, onvif
 from ..media import piper as piper_mod
 from ..media import tts as tts_mod
 from ..engine import CameraBusy, Engine
@@ -31,7 +32,7 @@ from ..sounds import MAX_UPLOAD_BYTES, to_wav
 from ..settings import Settings
 from ..store import Store
 from . import auth
-from .tls import ensure_certificate
+from .tls import cert_fingerprint, ensure_certificate
 
 log = logging.getLogger("cam2sip.web")
 STATIC = Path(__file__).parent / "static"
@@ -174,6 +175,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await asyncio.wait_for(https[1], 5)
         await engine.stop()
 
+    tls_state = {"cert": "", "fingerprint": ""}
+
     async def start_https(asgi_app):
         """Second listener with TLS (same app), so browsers allow the microphone."""
         if not settings.https_port:
@@ -181,6 +184,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         pair = ensure_certificate(settings.data_dir, settings.tls_cert, settings.tls_key)
         if not pair:
             return None
+        tls_state["cert"], tls_state["fingerprint"] = pair[0], cert_fingerprint(pair[0])
         config = uvicorn.Config(asgi_app, host=settings.web_host, port=settings.https_port,
                                 ssl_certfile=pair[0], ssl_keyfile=pair[1], lifespan="off",
                                 log_config=None, access_log=False, proxy_headers=False,
@@ -214,7 +218,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.middleware("http")
     async def require_auth(request: Request, call_next):
         path = request.url.path
-        if path.startswith("/api/"):
+        if path.startswith("/api/integration/v1/"):
+            pass                        # own token auth (integration.router), never the admin session
+        elif path.startswith("/api/"):
             if cross_site(request.headers, request.method):
                 return JSONResponse({"detail": "cross-site request refused"}, status_code=403)
             if path not in PUBLIC and not authed(request):
@@ -695,6 +701,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         s.admin_password_hash = await asyncio.to_thread(auth.hash_password, body.new)
         store.save()
         set_cookie(request, response)
+        return {"ok": True}
+
+    # -- integrations (telerouter) ------------------------------------------------------------------
+    app.include_router(integration.router(engine, store))
+
+    @app.get("/api/settings/integration")
+    async def integration_status():
+        s = cfg.settings
+        return {"token_set": bool(s.integration_token_hash), "token_created": s.integration_token_created,
+                "https_port": settings.https_port if tls_state["cert"] else 0,
+                "tls_fingerprint": tls_state["fingerprint"]}
+
+    @app.post("/api/settings/integration-token")
+    async def integration_token():
+        token = integration.new_token()
+        cfg.settings.integration_token_hash = integration.token_hash(token)
+        cfg.settings.integration_token_created = time.time()
+        store.save()
+        log.info("integration token created (the previous one, if any, stops working)")
+        return {"token": token}
+
+    @app.delete("/api/settings/integration-token")
+    async def integration_token_revoke():
+        cfg.settings.integration_token_hash = ""
+        store.save()
+        log.info("integration token revoked")
         return {"ok": True}
 
     @app.post("/api/settings/api-token")

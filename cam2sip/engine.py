@@ -18,7 +18,8 @@ from .media.rtp import Pacer, PortAllocator, RtpPacket
 from .media.rtsp import RtspAudioClient, TalkServer
 from .models import Bridge, Camera
 from .settings import Settings
-from .sip.ua import AccountConfig, Call, UserAgent
+from .integration import Tickets
+from .sip.ua import Account, AccountConfig, Call, UserAgent
 from .sounds import SoundLibrary
 from .store import Store
 from .webcall import WebCall
@@ -476,6 +477,8 @@ class Engine:
         self.ua = UserAgent(settings.sip_port, self.ports, settings.advertise_ip,
                             user_agent=f"cam2sip/{settings.version}", bind=settings.sip_bind)
         self.ua.on_incoming = self.on_incoming
+        self.tickets = Tickets()                       # one-time addresses for integration calls
+        self.ua.direct_resolver = self._ticket_account
         self.go2rtc = Go2rtc(settings.go2rtc_api, settings.go2rtc_rtsp)
         self.talk_server = TalkServer("127.0.0.1", settings.talk_port)
         self.tts = tts.Tts(data_dir=settings.data_dir, piper_port=settings.piper_port)
@@ -599,7 +602,37 @@ class Engine:
     def _phone_for_account(self, account_id: str):
         return self.store.phone(account_id)
 
+    def _ticket_account(self, user: str) -> Account | None:
+        """A non-registering account for an INVITE to a one-time integration address."""
+        if not self.tickets.peek(user):
+            return None
+        return Account(self.ua, AccountConfig(id=f"ticket:{user}", server="0.0.0.0", port=5060, username="cam2sip",
+                                              password="", display_name="cam2sip", contact_user=user))
+
+    async def _integration_call(self, call: Call) -> None:
+        src = call.peer_addr[0] if call.peer_addr else ""
+        ticket = self.tickets.take(call.account.cfg.id[7:], src)
+        camera = self.store.camera(ticket.camera_id) if ticket else None
+        if not ticket or not camera or not camera.enabled:
+            call.reject(404, "Not Found")
+            return
+        if camera.id in self.busy:
+            call.reject(486, "Busy Here")
+            return
+        self.busy[camera.id] = call
+        bridge = Bridge(id="integration", name="telerouter", mode="direct", camera_id=camera.id, phone_id="")
+        session = BridgeSession(self, bridge, call, camera)
+        self._attach(call, session, bridge)
+        call.ring()
+        await session.start()
+        if call.state == "ringing":
+            await call.answer()
+            log.info("integration call from %s answered: camera %s (%s)", src, camera.name, call.codec)
+
     async def on_incoming(self, call: Call) -> None:
+        if call.account.cfg.id.startswith("ticket:"):
+            await self._integration_call(call)
+            return
         phone = self._phone_for_account(call.account.cfg.id)
         who = call.remote_user or "unknown"
         ext = call.account.cfg.username

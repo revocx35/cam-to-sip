@@ -206,6 +206,9 @@ class Settings(BaseModel):
     admin_password_hash: str = ""
     session_secret: str = Field(default_factory=lambda: secrets.token_hex(32))
     api_token: str = Field(default_factory=lambda: secrets.token_urlsafe(24))
+    # integration API (telerouter): only the SHA-256 of the token is kept
+    integration_token_hash: str = ""
+    integration_token_created: float = 0.0
 
 
 class Config(BaseModel):

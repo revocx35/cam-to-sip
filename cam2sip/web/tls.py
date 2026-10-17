@@ -60,3 +60,13 @@ def ensure_certificate(data_dir: str, cert: str = "", key: str = "") -> tuple[st
     os.chmod(key_path, 0o600)
     log.info("created self-signed HTTPS certificate for %s", ", ".join(sans))
     return str(cert_path), str(key_path)
+
+
+def cert_fingerprint(cert_path: str) -> str:
+    """SHA-256 of the certificate (DER), as hex - what integrations (telerouter) pin."""
+    import hashlib
+    import ssl
+    try:
+        return hashlib.sha256(ssl.PEM_cert_to_DER_cert(Path(cert_path).read_text())).hexdigest()
+    except (OSError, ValueError):
+        return ""
