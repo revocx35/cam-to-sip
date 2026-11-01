@@ -107,3 +107,7 @@ Pushes to `main` run CI (pytest) and build a multi-arch image to `ghcr.io/revocx
 The integration API is HTTPS only (`request.url.scheme`), skips the admin-session middleware and checks its
 own token (SHA-256 in `Settings.integration_token_hash`). Keep docs/integration-api.md identical to
 telerouter's copy. Tests: `tests/test_integration.py`.
+
+## v1.7.1 (2026-11-01) — bug-hunt fixes
+Malformed SIP packets (unparseable Via/CSeq) are dropped instead of raising in the UDP callback, and the `:8443`
+listener's session cookie is `Secure` and has its own name (users on that listener sign in once more).
