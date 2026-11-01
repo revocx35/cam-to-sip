@@ -46,7 +46,7 @@ services:
       CAM2SIP_GO2RTC_RTSP: rtsp://127.0.0.1:18554
       CAM2SIP_LOG_LEVEL: INFO
       CAM2SIP_SIP_TRACE: "false"
-      CAM2SIP_SECURE_COOKIES: "auto"      # Secure cookie when a trusted reverse proxy reports HTTPS
+      CAM2SIP_SECURE_COOKIES: "auto"      # Secure cookie on HTTPS (:8443 or a trusted reverse proxy)
       CAM2SIP_TRUSTED_PROXIES: "private"  # proxies allowed to set X-Forwarded-For/-Proto (IPs/CIDRs, private, none)
     volumes:
       - cam2sip-data:/data                # config.json, call history, TLS certificate

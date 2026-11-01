@@ -213,7 +213,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         header = request.headers.get("authorization", "")
         if header.lower().startswith("bearer ") and s.api_token:
             return hmac.compare_digest(header[7:].strip(), s.api_token)
-        return auth.check_session(request.cookies.get(auth.COOKIE), s.session_secret, s.admin_password_hash)
+        return auth.check_session(request.cookies.get(cookie_name(request)), s.session_secret, s.admin_password_hash)
 
     @app.middleware("http")
     async def require_auth(request: Request, call_next):
@@ -253,14 +253,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     def cookie_secure(request: Request) -> bool:
         if settings.secure_cookies == "auto":
-            # HTTPS as reported by a trusted reverse proxy. Not for the direct :8443 listener: a
-            # Secure cookie there would shadow the plain-HTTP UI on :8090 for the same host.
-            return request.url.scheme == "https" and "x-forwarded-proto" in request.headers
+            # HTTPS: the own :8443 listener, or a trusted reverse proxy (ProxyHeadersMiddleware sets the
+            # scheme only for those). Cookies are not port-scoped: one without Secure from :8443 would
+            # also be sent in clear text to the plain-HTTP UI on :8090.
+            return request.url.scheme in ("https", "wss")
         return settings.secure_cookies == "true"
+
+    def cookie_name(request) -> str:
+        # a Secure cookie named like the plain one would shadow the plain-HTTP UI (browsers keep an
+        # http:// response from replacing it and never send it there), so HTTPS uses its own name
+        return auth.SECURE_COOKIE if cookie_secure(request) else auth.COOKIE
 
     def set_cookie(request: Request, resp: Response) -> None:
         s = store.config.settings
-        resp.set_cookie(auth.COOKIE, auth.make_session(s.session_secret, s.admin_password_hash),
+        resp.set_cookie(cookie_name(request), auth.make_session(s.session_secret, s.admin_password_hash),
                         max_age=auth.SESSION_TTL, httponly=True, samesite="strict",
                         secure=cookie_secure(request))
 
@@ -305,7 +311,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/logout")
     async def logout(request: Request, response: Response):
-        response.delete_cookie(auth.COOKIE, httponly=True, samesite="strict", secure=cookie_secure(request))
+        response.delete_cookie(cookie_name(request), httponly=True, samesite="strict", secure=cookie_secure(request))
         return {"ok": True}
 
     # -- helpers ------------------------------------------------------------------------
@@ -746,7 +752,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return False
         if "sec-fetch-site" not in ws.headers and foreign_origin(ws.headers):
             return False
-        return auth.check_session(ws.cookies.get(auth.COOKIE), s.session_secret, s.admin_password_hash)
+        return auth.check_session(ws.cookies.get(cookie_name(ws)), s.session_secret, s.admin_password_hash)
 
     async def ws_reject(ws: WebSocket, message: str, code: int) -> None:
         await ws.send_text(json.dumps({"type": "error", "message": message}))

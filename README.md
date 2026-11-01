@@ -124,7 +124,7 @@ All settings are optional environment variables, set in `.env` (see [.env.exampl
 | `PIPER_PORT` | `18556` | Internal natural-voice TTS process (127.0.0.1) |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING` |
 | `SIP_TRACE` | `false` | Log every SIP message (debugging registration/calls) |
-| `SECURE_COOKIES` | `auto` | `Secure` session cookie: `auto` = when a trusted reverse proxy reports HTTPS, `true` = always, `false` = never |
+| `SECURE_COOKIES` | `auto` | `Secure` session cookie: `auto` = on HTTPS (port 8443, or a trusted reverse proxy reporting HTTPS; that cookie is named `__Host-cam2sip_session`), `true` = always, `false` = never |
 | `TRUSTED_PROXIES` | `private` | Reverse proxies allowed to set `X-Forwarded-For`/`-Proto`: comma-separated IPs/networks, `private` (loopback + private networks) or `none`. Login throttling uses the client IP they report |
 
 Cameras, phones and bridges are stored in the `cam2sip-data` Docker volume (`/data/config.json`, mode 0600). Back up that volume to keep your configuration.

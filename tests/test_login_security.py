@@ -171,6 +171,22 @@ def test_cookie_is_secure_behind_https_proxy(app):
     assert "secure" not in r.headers["set-cookie"].lower()
 
 
+def test_cookie_is_secure_on_the_own_https_listener(app):
+    # :8443 serves the same app: a login there must get a Secure cookie (cookies are not port-scoped, a
+    # plain one would also go in clear text to :8090), under its own name so it can't shadow :8090's
+    direct = TestClient(app, base_url="https://testserver", client=("192.168.1.71", 50000))
+    cookie = login(direct, PASSWORD).headers["set-cookie"]
+    assert cookie.startswith("__Host-cam2sip_session=") and "secure" in cookie.lower()
+    assert direct.get("/api/session").json()["authenticated"] is True
+    cam = direct.post("/api/cameras", json={"name": "Door", "kind": "tapo", "host": "10.0.0.5"}).json()
+    with direct.websocket_connect(f"wss://testserver/api/cameras/{cam['id']}/video",
+                                  headers={"Origin": "https://testserver"}) as ws:
+        assert ws.receive_json()["message"].startswith("go2rtc unavailable")       # past the auth check
+    plain = client_at(app, "192.168.1.72")
+    assert login(plain, PASSWORD).headers["set-cookie"].startswith("cam2sip_session=")
+    assert plain.get("/api/session").json()["authenticated"] is True
+
+
 def test_new_passwords_need_ten_characters(tmp_path, app):
     c = client_at(app, "192.168.1.60")
     assert login(c, PASSWORD).status_code == 200
